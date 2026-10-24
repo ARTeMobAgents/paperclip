@@ -11608,9 +11608,12 @@ export function createToolGatewayService(
     async nextCredentialExpiryAt(): Promise<number | null> {
       const [row] = await db.execute<{ at: string | Date | null }>(sql`
         select min(expires_at) as at from (
-          select ${toolMcpGatewayTokens.expiresAt} as expires_at from ${toolMcpGatewayTokens}
+          (select ${toolMcpGatewayTokens.expiresAt} as expires_at from ${toolMcpGatewayTokens}
+            where ${toolMcpGatewayTokens.expiresAt} is not null
+            order by ${toolMcpGatewayTokens.expiresAt} limit 1)
           union all
-          select ${toolGatewaySessions.expiresAt} as expires_at from ${toolGatewaySessions}
+          (select ${toolGatewaySessions.expiresAt} as expires_at from ${toolGatewaySessions}
+            order by ${toolGatewaySessions.expiresAt} limit 1)
         ) expiries
       `);
       return row?.at == null ? null : new Date(row.at).getTime();
