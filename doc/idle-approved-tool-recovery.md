@@ -75,8 +75,16 @@ Controlled Test-tab provider tests cover both foreground/recovery race winners,
 completed legacy outcomes, interrupted legacy calls, target changes, and a failed
 atomic outcome write followed by quarantine without another provider call.
 
-The service/startup selection passes 122 tests. The existing gateway acceptance
+The service/startup selection passes 123 tests. The existing gateway acceptance
 suite passes 92 tests. The strengthened paging and outcome-failure cases pass
 again after their final edits. Workspace typecheck and build pass. Full CI and
 review remain separate PR gates; no real external provider was invoked by these
 fixtures.
+
+Review found that a one-shot success-write failure could fall into the provider
+error handler and save a false failure on its second attempt. The added sequence-
+based PostgreSQL fault reproduces that bug before the fix. Provider execution,
+pre-dispatch validation, and outcome persistence now have separate error
+boundaries. Both persistent and one-shot result-write failures retain the claim
+for quarantine without repeating the call. The complete 123-test selection and
+92 gateway acceptance cases pass after the repair, as do typecheck and build.

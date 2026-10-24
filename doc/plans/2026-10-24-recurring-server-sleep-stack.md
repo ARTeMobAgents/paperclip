@@ -179,3 +179,14 @@ login-cleanup timeout after all 16 local tests passed. #17453 has a Runner
 prepared-launch close failure. Seven focused local Runner cases also fail, so
 this is under investigation rather than assumed flaky. No retry of that run has
 been requested. Neither parent is reported green without fresh evidence.
+
+
+Slice 05 is [#17454](https://github.com/paperclipai/paperclip/pull/17454).
+Review identified a real one-shot outcome-write error path. A new regression
+failed before the repair; result persistence now runs outside provider-error
+handling. The repaired head passes 123 service/startup tests, 92 acceptance
+tests, workspace typecheck and build. Fresh CI/review remains required.
+#17450 now has passing checks after its single retry. The local Runner
+reproduction for #17453 was missing the fake-provider binary: its durable state
+showed ENOENT hidden by close failure. After building the fixture all seven
+cases pass; one CI retry is running.

@@ -7452,9 +7452,11 @@ export function createToolGatewayService(
     });
 
     const startedAt = Date.now();
+    let connectedMcpExecution: Awaited<ReturnType<typeof executeRemoteHttpTool>> | Awaited<ReturnType<typeof executeLocalStdioTool>> | null;
+    let resultValidation: Awaited<ReturnType<typeof validateToolContent>>;
     try {
       const executionTimeoutMs = timeoutMs(args.timeoutMs, args.tool);
-      const connectedMcpExecution =
+      connectedMcpExecution =
         (args.tool.providerType === "mcp_remote_http" || args.tool.providerType === "provider_rest")
           ? await executeRemoteHttpTool(
               args.session,
@@ -7485,7 +7487,7 @@ export function createToolGatewayService(
         );
       }
       const result = connectedMcpExecution.result;
-      const resultValidation = await validateToolContent({
+      resultValidation = await validateToolContent({
         value: result,
         direction: "result",
         sensitiveMode: "redact",
@@ -7496,58 +7498,6 @@ export function createToolGatewayService(
         throw new ToolGatewayHttpError(502, String(providerResult.content || providerResult.error),
           "tool_error", { execution: connectedMcpExecution.execution });
       }
-      await persistToolTestOutcome(db, args.invocationId, {
-        status: "succeeded", result: resultValidation.summary,
-      }, args.approvedClaim);
-      await writeToolCallEvent({
-        invocationId: args.invocationId,
-        session: args.session,
-        eventType: "call_completed",
-        outcome: "success",
-        toolName: args.tool.name,
-        policyDecision: "allow",
-        reasonCode: "tool_completed",
-        argumentsSummary: args.argumentsSummary,
-        resultSummary: resultValidation.summary,
-        detectorMetadata: resultValidation.detectorMetadata,
-        metadata: {
-          source: "test",
-          headerSummary: connectedMcpExecution.headerSummary ?? undefined,
-          execution: connectedMcpExecution.execution,
-        },
-        tool: args.tool,
-      });
-      await writeAudit({
-        session: args.session,
-        companyId: args.companyId,
-        agentId: args.agentId,
-        runId: null,
-        issueId: null,
-        actorType: "user",
-        actorId: args.userId,
-        action: "tool_gateway.call_completed",
-        details: {
-          source: "test",
-          invocationId: args.invocationId,
-          decision: "allow",
-          reasonCode: "tool_completed",
-          tool: args.tool.name,
-          ...toolAuditMetadata(args.tool),
-          durationMs: Date.now() - startedAt,
-          argumentsSummary: args.argumentsSummary,
-          result: summarizeResult(resultValidation.value),
-          resultSummary: resultValidation.summary,
-          promptInjection: resultValidation.detectorMetadata,
-          headerSummary: connectedMcpExecution.headerSummary ?? undefined,
-          execution: connectedMcpExecution.execution,
-        },
-      });
-      void emitConnectionInvoked(db, args.invocationId);
-      return {
-        decision: "allowed" as const,
-        invocationId: args.invocationId,
-        result: resultValidation.value,
-      };
     } catch (err) {
       const status = err instanceof ToolGatewayHttpError ? err.status : 502;
       const reasonCode =
@@ -7619,16 +7569,61 @@ export function createToolGatewayService(
           : {}),
       };
     }
+    await persistToolTestOutcome(db, args.invocationId, {
+      status: "succeeded", result: resultValidation.summary,
+    }, args.approvedClaim);
+    await writeToolCallEvent({
+      invocationId: args.invocationId,
+      session: args.session,
+      eventType: "call_completed",
+      outcome: "success",
+      toolName: args.tool.name,
+      policyDecision: "allow",
+      reasonCode: "tool_completed",
+      argumentsSummary: args.argumentsSummary,
+      resultSummary: resultValidation.summary,
+      detectorMetadata: resultValidation.detectorMetadata,
+      metadata: {
+        source: "test",
+        headerSummary: connectedMcpExecution.headerSummary ?? undefined,
+        execution: connectedMcpExecution.execution,
+      },
+      tool: args.tool,
+    });
+    await writeAudit({
+      session: args.session,
+      companyId: args.companyId,
+      agentId: args.agentId,
+      runId: null,
+      issueId: null,
+      actorType: "user",
+      actorId: args.userId,
+      action: "tool_gateway.call_completed",
+      details: {
+        source: "test",
+        invocationId: args.invocationId,
+        decision: "allow",
+        reasonCode: "tool_completed",
+        tool: args.tool.name,
+        ...toolAuditMetadata(args.tool),
+        durationMs: Date.now() - startedAt,
+        argumentsSummary: args.argumentsSummary,
+        result: summarizeResult(resultValidation.value),
+        resultSummary: resultValidation.summary,
+        promptInjection: resultValidation.detectorMetadata,
+        headerSummary: connectedMcpExecution.headerSummary ?? undefined,
+        execution: connectedMcpExecution.execution,
+      },
+    });
+    void emitConnectionInvoked(db, args.invocationId);
+    return {
+      decision: "allowed" as const,
+      invocationId: args.invocationId,
+      result: resultValidation.value,
+    };
+
   }
 
-  /**
-   * Drive a freshly-approved test-origin ask-first request to completion. The
-   * Test tab has no agent run to re-invoke the parked call, so approving it in
-   * the Review tab is what executes it — the live status panel then surfaces the
-   * real result. Reconstructs the impersonated test session and the signed
-   * arguments, and never throws: any failure is recorded on the invocation so it
-   * shows up as an error in the panel rather than rolling back the approval.
-   */
   async function runApprovedTestInvocation(
     invocation: typeof toolInvocations.$inferSelect,
     signedPayload: NonNullable<ReturnType<typeof readSignedToolArgumentsPayload>>,
@@ -7636,6 +7631,7 @@ export function createToolGatewayService(
   ): Promise<void> {
     const claim = await claimToolTestApproval(db, actionRequestId, invocation.id);
     if (!claim) return;
+    let execution: Parameters<typeof runTestToolInvocation>[0];
     try {
       const agentId = invocation.agentId;
       if (!invocation.connectionId || !agentId) {
@@ -7662,16 +7658,18 @@ export function createToolGatewayService(
       }
       const argumentsSummary = (await validateToolContent({ value: signedPayload.arguments,
         direction: "arguments", sensitiveMode: "redact", promptInjectionMode: "ignore" })).summary;
-      await runTestToolInvocation({ session, tool, parameters: signedPayload.arguments, invocationId: invocation.id,
+      execution = { session, tool, parameters: signedPayload.arguments, invocationId: invocation.id,
         companyId: invocation.companyId, agentId, userId, argumentsSummary, reasonCode: "approval_granted",
-        approvedClaim: claim, matchedPolicyIds: invocation.matchedPolicyIds ?? [] });
+        approvedClaim: claim, matchedPolicyIds: invocation.matchedPolicyIds ?? [] };
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const errorCode = err instanceof ToolGatewayHttpError || err instanceof ToolContentValidationError
         ? err.reasonCode : "tool_execution_failed";
       const settled = await persistToolTestOutcome(db, invocation.id, { status: "failed", errorCode, errorMessage: message }, claim);
       if (settled) void emitConnectionInvoked(db, invocation.id);
+      return;
     }
+    await runTestToolInvocation(execution);
   }
 
   async function waitForActionRequestExecution(actionRequestId: string) {
