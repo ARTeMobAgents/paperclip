@@ -8,6 +8,7 @@ import { executionWorkspaces, issues, heartbeatRuns, nativeRunFinalizations, env
   workspaceRuntimeServices, issueRecoveryActions, projectWorkspaces, withDedicatedDbConnection, type Db } from "@paperclipai/db";
 import { createGitRemoteAuthProvider } from "./git-credentials.js";
 import type { StorageService } from "../storage/types.js";
+import { TASK_DIRECTORY_RETENTION_KEY } from "./isolated-task-directory-snapshot.js";
 import { currentRestorePointSnapshot, RestorePointSkip, type RestorePointLimits } from "./git-restore-point.js";
 import { abandonGitRestorePoint, abandonGitRestorePointsByKey, activateGitRestorePoints, restorePointHistoryUnchanged, restorePointSnapshotMatches, storeGitRestorePoint } from "./git-restore-point-storage.js";
 import { withIsolatedRepositorySourceLock, verifiedRecordedIsolatedRemoteSource } from "./isolated-remote-workspace-source.js";
@@ -136,8 +137,13 @@ export async function gitWorkspaceLastActivityAt(db: Db | Tx, workspace: Workspa
   return at ? new Date(at) : null;
 }
 
-export async function isGitWorkspaceExpirationEligible(tx: Tx, workspace: Workspace, now: Date, idleCutoff?: Date) {
+export async function isGitWorkspaceExpirationEligible(tx: Tx, workspace: Workspace, now: Date, idleCutoff?: Date,
+  options: { closedSiblingsAllowed?: boolean } = {}) {
   if (workspace.metadata?.reopenPendingConsumption === true) return false;
+  const siblingBlocks = options.closedSiblingsAllowed
+    ? sql`AND (other.status NOT IN ('archived', 'cleanup_failed') OR other.closed_at IS NULL
+        OR other.metadata->${TASK_DIRECTORY_RETENTION_KEY}->>'removed' = 'false')`
+    : sql``;
   const closedTree = idleCutoff ? sql`
       NOT EXISTS (SELECT 1 FROM tree WHERE updated_at > ${idleCutoff.toISOString()}::timestamptz)
       AND NOT EXISTS (SELECT 1 FROM bound WHERE updated_at > ${idleCutoff.toISOString()}::timestamptz)
@@ -155,7 +161,7 @@ export async function isGitWorkspaceExpirationEligible(tx: Tx, workspace: Worksp
     SELECT CASE WHEN
       EXISTS (SELECT 1 FROM ${executionWorkspaces} other WHERE other.id <> ${workspace.id}
         AND (other.cwd = ${workspace.cwd} OR other.provider_ref = ${workspace.cwd}
-          OR left(other.cwd, length(${workspace.cwd}) + 1) = ${workspace.cwd} || '/'))
+          OR left(other.cwd, length(${workspace.cwd}) + 1) = ${workspace.cwd} || '/') ${siblingBlocks})
       OR EXISTS (SELECT 1 FROM ${projectWorkspaces} WHERE cwd = ${workspace.cwd}
         OR left(cwd, length(${workspace.cwd}) + 1) = ${workspace.cwd} || '/')
     THEN false ELSE (

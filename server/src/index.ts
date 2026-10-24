@@ -1481,6 +1481,11 @@ async function startServerWithDatabaseTeardown(
         idleMs: config.gitRestorePointIdleDays > 0 ? config.gitRestorePointIdleDays * 24 * 60 * 60 * 1000 : null,
         keyDurable: config.storageProvider !== "s3" || Boolean(process.env.PAPERCLIP_SECRETS_MASTER_KEY?.trim()),
       } : undefined,
+      taskDirectoryRetention: config.taskDirectoryRetentionEnabled ? {
+        dryRun: config.taskDirectoryRetentionDryRun,
+        terminalDelayMs: config.gitRestorePointTerminalDelayDays * 24 * 60 * 60 * 1000,
+        orphanGraceMs: config.taskDirectoryOrphanGraceDays * 24 * 60 * 60 * 1000,
+      } : undefined,
       workspaceReaperCooldownDays: config.workspaceReaperCooldownDays,
       workspaceCompactionDelayMs: config.workspaceCompactionDelayHours === null
         ? null

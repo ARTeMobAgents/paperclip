@@ -214,6 +214,116 @@ still keep a worktree from expiring.
 Restore points are refused when the file storage is `s3` and the secrets master key
 does not come from `PAPERCLIP_SECRETS_MASTER_KEY`.
 
+## Isolated task directories
+
+Tasks without a project repository run in a plain (non-Git) directory at
+`<instance>/isolated-workspaces/<companyId>/<issueId>/`. Its execution workspace row has
+strategy `project_primary`, provider `local_fs` and that exact path as `cwd`, in
+`isolated_workspace` or `shared_workspace` mode. Agents can leave the only copy of their
+work there, such as reports or generated files, because nothing pushes it anywhere.
+
+Before this cleanup existed nothing removed these directories. The terminal workspace
+reaper archives a workspace only after proving delivery through Git (a merged pull request
+or a merged branch); for a directory that is not a Git checkout the status inspection fails,
+so the row was always skipped as undelivered. A workspace archived by hand keeps its
+directory too: artifact cleanup removes a `local_fs` directory only when the row says the
+runtime created it, and task directory rows never say so. Deleting them on archive would
+discard work silently, so retention saves the files first instead.
+
+With `PAPERCLIP_TASK_DIRECTORY_RETENTION_ENABLED=true` the terminal workspace reaper
+handles an open task directory row once every issue in its tree has been `done` or
+`cancelled` for `PAPERCLIP_GIT_RESTORE_POINT_TERMINAL_DELAY_DAYS` (default `3`), the same
+delay git restore points use. It registers that moment as its deadline, so a closed tree
+costs no checks before then. It removes the directory only when all of these hold, checked
+under the issue's source lock and the workspace lifecycle lock:
+
+- the source issue is still bound to the workspace (`issue_not_bound` otherwise), because
+  reopening restores through that binding;
+- no run of the tree or the workspace is queued, running or unfinished, no native run
+  finalization is unsettled, no environment lease or runtime service is live, no recovery
+  action is unresolved and the workspace is not waiting for a reopen to be consumed
+  (`live_or_unresolved_consumer`); these are the checks git cache expiration uses;
+- no other open workspace or project workspace points into the directory (closed rows
+  for the same issue do not count);
+- the directory is a real directory, not a symbolic link (`unsafe_task_directory`).
+
+It then saves a restore point of the directory: every file with its mode, every
+directory and every symbolic link (the link itself; links are never followed). A
+`node_modules` directory next to a `package.json` is left out, because installing the
+package recreates it. Sockets, devices and other special files keep the directory
+(`unsupported_filesystem_entry`), and so does a directory over the restore point limits
+(`task_directory_too_many_files`, `task_directory_file_too_large`,
+`task_directory_too_large`; 20,000 files, 64 MiB per file, 256 MiB in total). The restore
+point uses the git restore point ledger, storage and encryption: it is sealed with a
+per-restore-point key wrapped by the instance secrets key, uploaded to file storage under
+`git-restore-points/<workspace>/<generation>/task-directory/`, read back and hash-checked,
+and activated in the same transaction that archives the workspace and records the
+`isolatedTaskDirectoryRetention` state in its metadata. It follows the git restore point
+retention (`PAPERCLIP_GIT_RESTORE_POINT_RETENTION_DAYS`, default `90`, after the tree
+closes). Restore points must be enabled (`PAPERCLIP_GIT_RESTORE_POINTS_ENABLED=true`,
+`restore_points_disabled` otherwise), and they are refused when the file storage is `s3`
+and the secrets master key does not come from `PAPERCLIP_SECRETS_MASTER_KEY`.
+
+Right before deletion the directory is read again. If anything changed since the capture,
+the workspace is made active again, the restore point is dropped and the directory stays
+(`task_directory_changed`). Otherwise the directory is renamed to
+`.expired-task-directory-<workspace>-<generation>` beside it and deleted. A removal the
+server could not finish is finished by a later sweep.
+
+Reopening the workspace restores the directory before anything uses it: a comment or an
+agent update on an issue bound to a closed `isolated_workspace`, or the next run of the
+issue in either mode. The files are written to a staging directory, verified against the
+saved digest and renamed into place. An empty directory in the way is replaced; a non-empty
+one that does not match keeps the workspace closed and fails the reopen instead of
+overwriting it. After a successful reopen the restore point is superseded and removed; the
+next retention saves a new one. When the restore point has already expired, the reopen
+starts with an empty directory and posts a system comment on the issue saying the earlier
+files are no longer available.
+
+### Orphaned task directories
+
+The reaper also walks `isolated-workspaces/` once per server start, at most 8 issue
+directories per sweep, continuing from that position in the next sweep. It never follows
+symbolic links. For each directory:
+
+- an open execution workspace pointing at or into it keeps it (the reaper handles that
+  row as above);
+- a closed workspace row that its issue is still bound to is handled like an open row:
+  the directory is saved in a restore point on that row and removed after the terminal
+  delay, and reopening restores it (outcome `preserved_and_removed`);
+- any other directory is an orphan: its workspace row is missing, or archived or
+  `cleanup_failed` without the issue bound to it. An orphan is removed when its issue is
+  gone, or every issue in the tree has been closed for
+  `PAPERCLIP_TASK_DIRECTORY_ORPHAN_GRACE_DAYS` (default `7`), and nothing in it changed
+  during that period, and no project workspace, live runtime service, unsettled run,
+  finalization, live lease or unresolved recovery action of the issue refers to it. An
+  orphan is not saved first: no workspace row can reopen it. If its issue is reopened
+  later without another workspace, its next run starts in an empty directory.
+
+When the walk ends and it kept a directory for a reason that can change, it registers the
+earliest moment that reason expires (end of the grace period, or a recheck a day later for
+open issues and an hour later for busy locks). Otherwise it registers no further work. It
+also deletes leftover `.expired-task-directory-*` and `.restoring-task-directory-*`
+directories older than an hour.
+
+### Controls and logs
+
+| Environment variable | Default | Effect |
+| --- | --- | --- |
+| `PAPERCLIP_TASK_DIRECTORY_RETENTION_ENABLED` | `false` | Set `true` to let the reaper handle task directories |
+| `PAPERCLIP_TASK_DIRECTORY_RETENTION_DRY_RUN` | `true` | Set `false` to save and remove; a dry run only reports candidates and needs no restore points |
+| `PAPERCLIP_TASK_DIRECTORY_ORPHAN_GRACE_DAYS` | `7` | Days an orphan's issue tree must be closed and its contents unchanged before removal (minimum `1`) |
+
+Each open or pending workspace logs `event: "execution_workspace.task_directory_retention"`
+with its outcome (`removed`, `dry_run` or `skipped`), skip reason, candidate bytes and
+reclaimed bytes. Each directory the walk inspects logs
+`event: "execution_workspace.task_directory_cleanup"` with its outcome (`removed`,
+`preserved_and_removed`, `dry_run` or `skipped`), reason and bytes. Each reopen that
+restores a directory logs `event: "execution_workspace.task_directory_restore"`. A sweep
+saves and removes at most 8 open task directories; the rest continue in the next sweep.
+Roll out with the dry run, inspect the candidates and skip reasons, then set the dry run to
+`false`.
+
 ## Nested project repository worktrees
 
 Extra project repositories that have no configured local folder are no longer full

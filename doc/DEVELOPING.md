@@ -2619,6 +2619,17 @@ Environment overrides:
   `PAPERCLIP_GIT_RESTORE_POINT_IDLE_DAYS=<days>` sets how long an open issue tree's
   worktree must go untouched before it is removed the same way; runs restore it
   automatically. The default is `7`, and `0` turns this off.
+- `PAPERCLIP_TASK_DIRECTORY_RETENTION_ENABLED=true` lets the terminal workspace reaper
+  save and remove plain task directories under `<instance>/isolated-workspaces/` once
+  their issue tree has been closed for `PAPERCLIP_GIT_RESTORE_POINT_TERMINAL_DELAY_DAYS`,
+  and remove orphaned ones (see `doc/recoverable-disk-cleanup.md`). It is off by default
+  and runs as a dry run until `PAPERCLIP_TASK_DIRECTORY_RETENTION_DRY_RUN=false`. Removal
+  needs `PAPERCLIP_GIT_RESTORE_POINTS_ENABLED=true`, because the files are saved in an
+  encrypted restore point first and restored on reopen.
+  `PAPERCLIP_TASK_DIRECTORY_ORPHAN_GRACE_DAYS=<days>` sets how long an orphaned
+  directory's issue tree must be closed and its contents unchanged. The default is `7`
+  and the minimum is `1`. A negative, empty, or non-numeric value falls back to the
+  default.
 - `PAPERCLIP_GIT_RESTORE_POINT_RETENTION_DAYS=<days>` sets how long a git workspace
   restore point is kept after its issue tree closes (see
   `doc/recoverable-disk-cleanup.md`). The default is `90` and the minimum is `1`. A
