@@ -267,6 +267,7 @@ async function restartIsolatedPaperclipServer(input: {
   discardControllerCache?: boolean;
   crashAfterResult?: FinalizationCrashBinding;
   controllerOutage?: ControllerOutage;
+  recoveryBinding?: import("./controller-recovery-observer.js").RecoveryBinding;
   onControllerOutage?: (receipt: ControllerOutageReceipt) => Promise<void>;
 }): Promise<void> {
   const {
@@ -280,6 +281,7 @@ async function restartIsolatedPaperclipServer(input: {
     temporaryRequestPath,
     JSON.stringify({ requestId: input.requestId, discardControllerCache: input.discardControllerCache === true,
       ...(input.controllerOutage ? { controllerOutage: input.controllerOutage } : {}),
+      ...(input.recoveryBinding ? { recoveryBinding: input.recoveryBinding } : {}),
       ...(input.preserveRunner ? { preserveRunner: input.preserveRunner } : {}),
       ...(input.crashAfterResult ? { crashAfterResult: input.crashAfterResult } : {}) }),
     { encoding: "utf8", mode: 0o600 },
@@ -1249,16 +1251,22 @@ for (const execution of executions) {
         });
         issue = continuation.issue as IssueRecord; selectedRuns = continuation.runs as RunRecord[];
       } else if (execution.task.flow === "everyday_workflow") {
+        const { readUpgradeArtifacts, upgradeArtifactKey } = await import("./upgrade-artifacts.js");
+        const upgradeManifest = controllerOutage ? await readUpgradeArtifacts(process.env[upgradeArtifactKey]) : null;
+        let restartIndex = 0;
         const story = await runEverydayFlow({
           page, api, fixtures, execution, nonce, workspacePath, privateDir,
           deadlineAt: startedAtMs + deadlineMs,
-          restart: async () => {
+          restartCount: upgradeManifest ? upgradeManifest.sequence.length - 1 : 1,
+          restart: async recoveryBinding => {
             let receipt: ControllerOutageReceipt | undefined;
-            await restartIsolatedPaperclipServer({ api, requestId: `story-${nonce}`, deadlineAt: startedAtMs + deadlineMs,
+            restartIndex += 1;
+            await restartIsolatedPaperclipServer({ api, requestId: `story-${nonce}-${restartIndex}`, deadlineAt: startedAtMs + deadlineMs,
               discardControllerCache: controllerOutage !== undefined, controllerOutage,
+              ...(controllerOutage ? { recoveryBinding } : {}),
               onControllerOutage: async value => {
                 receipt = value;
-                await writeSanitizedJson(snapshotsDir, "controller-outage.json", value, secrets);
+                await writeSanitizedJson(snapshotsDir, `controller-outage-${restartIndex}.json`, value, secrets);
               } });
             return receipt;
           },

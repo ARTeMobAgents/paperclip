@@ -1,4 +1,5 @@
 import type { ServingArtifact } from "./upgrade-artifacts.js";
+import type { ControllerRecoveryReceipt } from "./controller-recovery-observer.js";
 import { setTimeout as delay } from "node:timers/promises";
 
 export interface ControllerOutage {
@@ -18,6 +19,8 @@ export interface ControllerOutageReceipt extends ControllerOutage {
   readyAfterMs?: number;
   previousArtifact?: ServingArtifact;
   replacementArtifact?: ServingArtifact;
+  recovery?: ControllerRecoveryReceipt;
+  recoveryProgress?: Partial<ControllerRecoveryReceipt>;
 }
 
 export function parseControllerOutage(value: unknown): ControllerOutage {
@@ -74,6 +77,8 @@ export async function replaceController<T extends { pid?: number }>(input: {
   record: (receipt: ControllerOutageReceipt) => Promise<void>;
   previousArtifact?: ServingArtifact;
   replacementArtifact?: () => ServingArtifact | undefined;
+  afterStopped?: (receipt: ControllerOutageReceipt) => Promise<void>;
+  afterReady?: (receipt: ControllerOutageReceipt, record: () => Promise<void>) => Promise<void>;
 }): Promise<ControllerOutageReceipt> {
   const outage = parseControllerOutage(input.outage);
   const started = performance.now();
@@ -87,6 +92,7 @@ export async function replaceController<T extends { pid?: number }>(input: {
   await input.stop(outage.signal);
   await input.waitForUnhealthy();
   receipt.stoppedAfterMs = performance.now() - started;
+  await input.afterStopped?.(receipt);
   await record();
   await input.discardCache();
   receipt.cacheDiscarded = true;
@@ -110,5 +116,6 @@ export async function replaceController<T extends { pid?: number }>(input: {
   }
   await record();
   if (!validControllerOutageReceipt(receipt, outage, input.requestId)) throw new Error("Controller outage did not produce a qualifying replacement receipt");
+  await input.afterReady?.(receipt, record);
   return receipt;
 }

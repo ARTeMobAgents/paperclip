@@ -71,7 +71,7 @@ export async function readUpgradeArtifacts(filename: string | undefined): Promis
   if (value?.schema !== "paperclip.e2e.upgrade-artifacts/v1" || !Array.isArray(value.sequence)
     || value.sequence.length < 3 || value.sequence.length > 9 || value.sequence[0] !== "A"
     || value.sequence[1] !== "B" || value.sequence[2] !== "A"
-    || value.sequence.some(id => id !== "A" && id !== "B")) throw new Error("Upgrade qualification requires an explicit A, B, A sequence");
+    || value.sequence.some((id, index) => (id !== "A" && id !== "B") || id === value.sequence[index - 1])) throw new Error("Upgrade qualification requires an explicit alternating A, B, A sequence");
   for (const id of ["A", "B"] as const) {
     const a = value.artifacts?.[id];
     if (!a || typeof a.root !== "string" || !hex(a.revision, 40) || !hex(a.treeSha256, 64)

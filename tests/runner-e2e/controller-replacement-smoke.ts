@@ -34,7 +34,25 @@ const report: Record<string, unknown> = { schema: "paperclip.e2e.controller-repl
   outage, providerTurns: 0, activeAgentContinuityQualified: false, cleanupConfirmed: false };
 const port = await reserveRunnerE2EServerPort();
 // The database belongs to this driver, never to either server process tree.
-const database = await startEmbeddedPostgresTestDatabase("controller-replacement-smoke-");
+const database = await (async () => {
+  const external = process.env.PAPERCLIP_TEST_DATABASE_URL;
+  if (!external) {
+    if (upgrades) throw new Error("Artifact migration proof requires PAPERCLIP_TEST_DATABASE_URL; the embedded test helper pre-migrates its database");
+    return startEmbeddedPostgresTestDatabase("controller-replacement-smoke-");
+  }
+  // Create an empty database. Artifact A must apply its own migrations before B
+  // sees it. Never migrate with source code or modify the supplied database.
+  const name = `upgrade_${randomUUID().replaceAll("-", "")}`;
+  const admin = createDb(external);
+  try { await admin.$client.unsafe(`create database "${name}"`); }
+  finally { await admin.$client.end(); }
+  const url = new URL(external); url.pathname = `/${name}`;
+  return { connectionString: url.toString(), cleanup: async () => {
+    const cleanup = createDb(external);
+    try { await cleanup.$client.unsafe(`drop database "${name}"`); }
+    finally { await cleanup.$client.end(); }
+  } };
+})();
 const db = createDb(database.connectionString);
 const log = createWriteStream(path.join(temporaryRoot, "wrapper.log"), { mode: 0o600 });
 const stopper = createRunnerE2EServerStopper({ gracefulTimeoutMs: 35_000, forcedTimeoutMs: 5_000,

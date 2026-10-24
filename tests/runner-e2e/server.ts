@@ -1,4 +1,5 @@
 import { readUpgradeArtifacts, verifyUpgradeArtifact, assertServingArtifact, upgradeArtifactKey, type ServingArtifact } from "./upgrade-artifacts.js";
+import { createControllerRecoveryObserver, parseRecoveryBinding, type RecoveryBinding } from "./controller-recovery-observer.js";
 import { parseFinalizationCrashBinding, readFinalizationCrashBoundary, type FinalizationCrashBinding } from "./finalization-crash-boundary.js";
 import { parseControllerOutage, replaceController, type ControllerOutage, type ControllerOutageReceipt } from "./controller-outage.js";
 import { parseRestartRunnerIdentity, type RestartRunnerIdentity } from "./process-tree-owner.js";
@@ -319,6 +320,7 @@ interface RestartRequest {
   discardControllerCache?: boolean;
   crashAfterResult?: FinalizationCrashBinding;
   controllerOutage?: ControllerOutage;
+  recoveryBinding?: RecoveryBinding;
 }
 
 async function readRestartRequest(): Promise<RestartRequest | null> {
@@ -353,6 +355,8 @@ async function readRestartRequest(): Promise<RestartRequest | null> {
   })) throw new Error("Controller cache replacement requires the explicit remote Codex restart cell");
   const crashAfterResult = (value as { crashAfterResult?: unknown }).crashAfterResult;
   const controllerOutage = (value as { controllerOutage?: unknown }).controllerOutage;
+  const recoveryBinding = (value as { recoveryBinding?: unknown }).recoveryBinding;
+  if (recoveryBinding !== undefined && controllerOutage === undefined) throw new Error("Recovery observation requires a controller outage");
   if (controllerOutage !== undefined && (!discardControllerCache || preserveRunner !== undefined || crashAfterResult !== undefined)) {
     throw new Error("Controller outage requires the explicit remote cache-replacement cell without another crash boundary");
   }
@@ -360,6 +364,7 @@ async function readRestartRequest(): Promise<RestartRequest | null> {
     throw new Error("A finalization crash cannot preserve a running provider or discard its controller cache");
   }
   return { requestId, discardControllerCache,
+    ...(recoveryBinding === undefined ? {} : { recoveryBinding: parseRecoveryBinding(recoveryBinding) }),
     ...(controllerOutage === undefined ? {} : { controllerOutage: parseControllerOutage(controllerOutage) }),
     ...(preserveRunner === undefined ? {} : { preserveRunner: parseRestartRunnerIdentity(preserveRunner) }),
     ...(crashAfterResult === undefined ? {} : { crashAfterResult: parseFinalizationCrashBinding(crashAfterResult) }) };
@@ -391,7 +396,7 @@ async function writeRestartAck(
   await rename(temporaryAckPath, restartAckPath);
 }
 
-async function restartServer({ requestId, preserveRunner, discardControllerCache, crashAfterResult, controllerOutage }: RestartRequest) {
+async function restartServer({ requestId, preserveRunner, discardControllerCache, crashAfterResult, controllerOutage, recoveryBinding }: RestartRequest) {
   activeRestartRequestId = requestId;
   appendLog(`\nRestart request ${requestId}: stopping Paperclip\n`);
   const previous = child;
@@ -404,25 +409,30 @@ async function restartServer({ requestId, preserveRunner, discardControllerCache
   if (controllerOutage) {
     if (upgradeArtifacts) artifactIndex += 1;
     const previousArtifact = servingArtifacts.get(previous);
-    const receipt = await replaceController({ requestId, previousPid: previous.pid!, outage: controllerOutage,
-      stop: async signal => {
-        if (signal === "SIGKILL") await stopServer.crashForRestart(previous);
-        else await stopServer(previous);
-        if (child === previous) child = null;
-      },
-      waitForUnhealthy: waitForHealthToStop, discardCache, start: startServer, waitForReady: waitForHealth,
-      ...(previousArtifact ? { previousArtifact, replacementArtifact: () => child && servingArtifacts.get(child) || undefined } : {}),
-      cancelled: shutdownRequested,
-      record: async receipt => {
-        const target = path.join(controlDirectory, `controller-outage-${requestId}.json`);
-        await writeFile(`${target}.tmp`, `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
-        await rename(`${target}.tmp`, target);
-      },
-    });
-    await writeRestartAck(requestId, "ready", undefined, true, undefined, receipt);
-    appendLog(`Restart request ${requestId}: Paperclip is healthy after ${Math.round(receipt.readyAfterMs!)}ms\n`);
-    activeRestartRequestId = null;
-    return;
+    const observer = recoveryBinding ? await createControllerRecoveryObserver(configPath, recoveryBinding) : undefined;
+    try {
+      const receipt = await replaceController({ requestId, previousPid: previous.pid!, outage: controllerOutage,
+        stop: async signal => {
+          if (signal === "SIGKILL") await stopServer.crashForRestart(previous);
+          else await stopServer(previous);
+          if (child === previous) child = null;
+        },
+        waitForUnhealthy: waitForHealthToStop, discardCache, start: startServer, waitForReady: waitForHealth,
+        ...(previousArtifact ? { previousArtifact, replacementArtifact: () => child && servingArtifacts.get(child) || undefined } : {}),
+        cancelled: shutdownRequested,
+        afterStopped: observer?.stopped,
+        afterReady: observer ? (receipt, record) => observer.recovered(receipt, record, shutdownRequested) : undefined,
+        record: async receipt => {
+          const target = path.join(controlDirectory, `controller-outage-${requestId}.json`);
+          await writeFile(`${target}.tmp`, `${JSON.stringify(receipt)}\n`, { mode: 0o600 });
+          await rename(`${target}.tmp`, target);
+        },
+      });
+      await writeRestartAck(requestId, "ready", undefined, true, undefined, receipt);
+      appendLog(`Restart request ${requestId}: Paperclip is healthy after ${Math.round(receipt.readyAfterMs!)}ms\n`);
+      activeRestartRequestId = null;
+      return;
+    } finally { await observer?.close(); }
   }
   const crashBoundary = crashAfterResult ? await readFinalizationCrashBoundary(async route => {
     const response = await fetch(`http://127.0.0.1:${port}${route}`, { signal: AbortSignal.timeout(5_000), cache: "no-store" });

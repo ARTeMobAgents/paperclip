@@ -51,6 +51,43 @@ exist; HTTP readiness or a replacement task is insufficient evidence of continui
 
 ## Current execution evidence (2026-10-24)
 
+Latest qualification changes and limits:
+
+- The recovery integration file now passes 37 tests against a disposable Docker
+  Postgres database. Five optional container-profile cases remain skipped.
+  This includes prepared-launch adoption and warm callback ownership. The
+  previous macOS semaphore setup failure was diagnosed before switching test
+  infrastructure; it was not a recovery failure or a passing attempt.
+- The supervisor records HTTP readiness, natural ownership acquisition,
+  authenticated attachment, resumed canonical ingestion, and final backlog
+  settlement separately. Its observer reads the existing coordinator and the
+  Runner-owned checkpoint evidence projection. Authentication requires the
+  durable connection count to increase; replaying saved events alone cannot
+  pass. Times are observation upper bounds. The observer never renews or edits
+  leases and never invokes recovery. Its qualification-only SQL is excluded
+  from product SQL cost measurements.
+- The remote workflow accepts admitted plugin task identities without treating
+  the web-server PID as a remote runner PID. It permits the original turn to
+  finish during the outage. An A/B/A manifest requires two independently graded
+  replacements; one passing restart cannot stand in for rollback.
+- The credential-free migration smoke creates an empty disposable database on
+  an explicitly supplied Postgres server. A applies its own migrations before
+  B starts. The embedded test helper pre-migrates databases, so it is rejected
+  for artifact migration proof. A/B revisions with identical migration journals
+  establish compatible startup/rollback only, not a nontrivial forward migration.
+- Development artifact preparation exposed packaging gaps in plain `pnpm deploy`:
+  its CLI self-reference pointed outside the installation, public entrypoints and
+  CLI dependencies were not materialized, and bundled server dependencies and
+  runtime skills were incomplete. These failed startup attempts ran zero agents.
+  The fixture uses the existing release manifest generators and bundled-package
+  preparer, stages release skills, and contains all dependency links before
+  freezing a new complete-tree hash. No failed tree is qualified.
+
+The 300-second active-agent upgrade, hosted continuity, representative concurrent
+admission, stale-owner partition, browser journeys, and released-version matrix
+remain acceptance gates. Do not infer them from the unit or zero-agent smoke
+results below.
+
 - Runner PR [#17097](https://github.com/paperclipai/paperclip/pull/17097)
   contains the optional contract and one-process fixture. Server PR
   [#17439](https://github.com/paperclipai/paperclip/pull/17439) contains its

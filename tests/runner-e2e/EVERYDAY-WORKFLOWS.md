@@ -328,3 +328,25 @@ consumed response cannot extend that wait.
 `declineGradeEvidence` retain the exact cloned assertion input and original
 checks. Later final-state or cleanup observations cannot overwrite that input.
 Earlier campaign grades remain unchanged when the evaluator is corrected.
+# Upgrade qualification receipts
+
+`PAPERCLIP_RUNNER_E2E_UPGRADE_ARTIFACTS` selects frozen installed A/B artifacts
+and an alternating A/B/A sequence. The remote controller-recovery workflow
+executes every requested replacement on the original active run. If that run
+ends before a later fault can be injected, that boundary is unexercised; starting
+a replacement task does not qualify it.
+
+The supervisor reads existing Postgres ownership and Runner-owned checkpoint
+evidence. It records HTTP readiness, natural lease takeover, a new authenticated
+connection, and ingestion past the stopped controller's saved event cursor.
+Final native and workspace receipts establish backlog settlement. No lease
+timestamps are edited. Authentication and processing must be observed within
+the original 420-second grace, including artifact verification and startup.
+
+For a credential-free startup/migration experiment, run
+`controller-replacement-smoke.ts` with the manifest and an explicit disposable
+`PAPERCLIP_TEST_DATABASE_URL`. The driver creates and drops a unique empty
+database; it does not change the supplied database. This smoke qualifies zero
+agent turns. The [qualification record](../../doc/plans/2026-10-22-hot-upgrade-qualification.md)
+is the acceptance ledger for exact artifacts, attempts, and remaining gates.
+
