@@ -1,3 +1,5 @@
+import { NATIVE_SESSION_EXECUTION_LEASE_TTL_MS, startNativeSessionExecutionLeaseRenewal } from "./native-execution-lease.js";
+export { renewNativeSessionExecutionLease } from "./native-execution-lease.js";
 import { DELIVERY_QUEUES } from "../delivery-work-notifications.js";
 import { writeExecutionControl } from "../execution-control-notifications.js";
 import { notifyExecutionRunWork } from "../execution-control-notifications.js";
@@ -394,8 +396,6 @@ const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set([
   "cancelled",
   "timed_out",
 ]);
-const NATIVE_SESSION_EXECUTION_LEASE_TTL_MS = 20 * 60_000;
-const NATIVE_SESSION_EXECUTION_LEASE_RENEW_INTERVAL_MS = 5 * 60_000;
 const NATIVE_SESSION_CANCELLATION_CLEANUP_GRACE_MS = 2_000;
 const NATIVE_RUNTIME_REQUEST_RESOLUTION_CACHE_MAX = 256;
 type NativeRuntimeRequestResolution = {
@@ -7511,93 +7511,6 @@ export function resolveNativeCancellationStatus(input: {
   };
 }
 
-export async function renewNativeSessionExecutionLease(input: {
-  db: Db;
-  runId: string;
-  companyId: string;
-  issueId: string;
-  leaseOwner: string;
-  attempt: number;
-  controller?: NativeControllerIdentity;
-  leaseTtlMs?: number;
-}): Promise<void> {
-  const controller =
-    input.controller ?? (await currentNativeControllerIdentity());
-  const leaseTtlMs = input.leaseTtlMs ?? NATIVE_SESSION_EXECUTION_LEASE_TTL_MS;
-  if (
-    !Number.isInteger(leaseTtlMs) ||
-    leaseTtlMs < 1_000 ||
-    leaseTtlMs > NATIVE_SESSION_EXECUTION_LEASE_TTL_MS
-  ) {
-    throw new Error("native_session_lease_ttl_invalid");
-  }
-  const [updated] = await input.db
-    .update(nativeRunFinalizations)
-    .set({
-      leaseExpiresAt: sql`now() + (${leaseTtlMs} * interval '1 millisecond')`,
-      updatedAt: sql`now()`,
-    })
-    .where(
-      and(
-        eq(nativeRunFinalizations.runId, input.runId),
-        eq(nativeRunFinalizations.companyId, input.companyId),
-        eq(nativeRunFinalizations.issueId, input.issueId),
-        eq(nativeRunFinalizations.leaseOwner, input.leaseOwner),
-        eq(nativeRunFinalizations.attempt, input.attempt),
-        eq(nativeRunFinalizations.controllerBootId, controller.bootId),
-        eq(nativeRunFinalizations.controllerPid, controller.pid),
-        eq(
-          nativeRunFinalizations.controllerProcessStartedAt,
-          controller.processStartedAt,
-        ),
-        gt(nativeRunFinalizations.leaseExpiresAt, sql`now()`),
-      ),
-    )
-    .returning({ runId: nativeRunFinalizations.runId });
-  if (!updated) throw new Error("native_session_lease_lost");
-}
-
-function startNativeSessionExecutionLeaseRenewal(input: {
-  db: Db;
-  runId: string;
-  companyId: string;
-  issueId: string;
-  leaseOwner: string;
-  attempt: number;
-  controller: NativeControllerIdentity;
-  remote?: boolean;
-}): { stop: () => Promise<void> } {
-  let leaseLost: Error | null = null;
-  let renewal = Promise.resolve();
-  const renew = () => {
-    if (leaseLost) return;
-    renewal = renewal
-      .then(() => renewNativeSessionExecutionLease({ ...input,
-        leaseTtlMs: input.remote ? REMOTE_CONTROLLER_LEASE_MS : undefined }))
-      .then(() => undefined)
-      .catch(async (error: unknown) => {
-        leaseLost =
-          error instanceof Error
-            ? error
-            : new Error("native_session_lease_lost");
-        if (input.remote) await detachNativeSessionsForRestart([input.runId], input.leaseOwner).catch(() => undefined);
-        else await cancelNativeSession(input.runId, "native session execution lease lost").catch(() => undefined);
-      });
-  };
-  const timer = setInterval(
-    renew,
-    input.remote ? REMOTE_CONTROLLER_LEASE_MS / 3 : NATIVE_SESSION_EXECUTION_LEASE_RENEW_INTERVAL_MS,
-  );
-  timer.unref?.();
-  return {
-    stop: async () => {
-      clearInterval(timer);
-      await renewal;
-      if (leaseLost) throw leaseLost;
-    },
-  };
-}
-
 export async function executePaperclipNativeSession(input: {
   casesEnabled?: boolean;
   getFreshSessionHandoff?: () => Promise<string | null>;
@@ -8887,6 +8800,9 @@ async function executePaperclipNativeSessionWithinScope(
     attempt,
     controller,
     remote: input.runnerExecutionTarget?.kind === "remote",
+    onLost: () => input.runnerExecutionTarget?.kind === "remote"
+      ? detachNativeSessionsForRestart([input.execution.binding.runId], leaseOwner)
+      : cancelNativeSession(input.execution.binding.runId, "native session execution lease lost"),
   });
   try {
     const usesPluginTask = input.runnerExecutionTarget?.kind === "remote" && input.runnerExecutionTarget.transport === "sandbox" && !!input.runnerExecutionTarget.runnerTask;

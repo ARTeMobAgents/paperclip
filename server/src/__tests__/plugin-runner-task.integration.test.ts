@@ -19,11 +19,10 @@ import { environmentRunOrchestrator } from "../services/environment-run-orchestr
 import { createRunnerProviderLaunch, runnerLaunchRequirementsDigest, type RunnerProviderLaunchRequirements } from "@paperclipai/paperclip-runner";
 import { createPluginRunnerTaskOwner } from "../services/native-runtime/plugin-runner-task.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
-import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { recoveryPostgresSupport as support, startRecoveryPostgres } from "./helpers/recovery-postgres.js";
 
 const ingress = vi.hoisted(() => ({ connect: vi.fn() }));
 vi.mock("../realtime/runner-prp-outbound.js", () => ({ connectRunnerPrpIngress: ingress.connect }));
-const support = await getEmbeddedPostgresTestSupport();
 const databaseSuite = support.supported ? describe : describe.skip;
 
 /** Real SDK serialization and dispatch with synthetic provider resources. */
@@ -59,8 +58,8 @@ databaseSuite("Core plugin Runner task lifecycle", () => {
   let db!: ReturnType<typeof createDb>;
   let stopDb: (() => Promise<void>) | undefined;
   beforeAll(async () => {
-    const started = await startEmbeddedPostgresTestDatabase("plugin-runner-task");
-    stopDb = started.stop; db = createDb(started.connectionString);
+    const started = await startRecoveryPostgres("plugin-runner-task");
+    stopDb = started.cleanup; db = createDb(started.connectionString);
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
   afterAll(async () => { await stopDb?.(); });
 
@@ -219,7 +218,7 @@ databaseSuite("Core plugin Runner task lifecycle", () => {
       });
       expect(recovered.lease.id).toBe(saved.id);
       const adopted = createPluginRunnerTaskOwner({ task: target.runnerTask, projectIds: [projectId], harness: "codex",
-        adoptExistingRunner: identity });
+        adoptIdentity: identity });
       const adoptedRegistration = await adopted.registration({} as never, runId);
       adoptedRegistration.activate(); await adoptedRegistration.ready();
       await adoptedRegistration.release("detach");

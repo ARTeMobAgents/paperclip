@@ -1,3 +1,4 @@
+import { startNativeSessionExecutionLeaseRenewal, type NativeExecutionLeaseRenewal } from "../native-runtime/native-execution-lease.js";
 import type { WorkspaceWorkers } from "../plugin-workspaces.js";
 import { listExpiredNativeRunnerAuthorities } from "../native-runtime/native-runner-checkpoint.js";
 import { createHeartbeatAgentStatus } from "./agent-status.js";
@@ -964,106 +965,122 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
         );
       }
     }
-    const dispositions = await claimNativeRestartRecoveries({
-      db,
-      runIds,
-      restartKind,
-      recoveryRequestId: intent?.recoveryRequestId ?? null,
-      coordinatedPreviousController: intent
-        ? {
-            pid: intent.previousServerPid,
-            processStartedAt:
-              previousStartedAt && !Number.isNaN(previousStartedAt.getTime())
-                ? previousStartedAt
-                : null,
-          }
-        : null,
-      now,
-    });
+    const preparationRenewals = new Map<string, NativeExecutionLeaseRenewal>();
+    try {
+      const dispositions = await claimNativeRestartRecoveries({
+        onClaim: (claim, scope) => {
+          if (!scope.remote || claim.kind !== "reattach_remote_runner") return;
+          // Start before the rest of the batch or its event writes can delay dispatch.
+          preparationRenewals.set(claim.runId, startNativeSessionExecutionLeaseRenewal({
+            db, ...scope, runId: claim.runId, leaseOwner: claim.leaseOwner,
+            attempt: claim.providerAttempt,
+            onLost: () => detachNativeSessionsForRestart([claim.runId], claim.leaseOwner),
+          }));
+        },
+        db,
+        runIds,
+        restartKind,
+        recoveryRequestId: intent?.recoveryRequestId ?? null,
+        coordinatedPreviousController: intent
+          ? {
+              pid: intent.previousServerPid,
+              processStartedAt:
+                previousStartedAt && !Number.isNaN(previousStartedAt.getTime())
+                  ? previousStartedAt
+                  : null,
+            }
+          : null,
+      });
 
-    const claims = dispositions.filter(
-      (disposition): disposition is NativeRestartRecoveryClaim =>
-        disposition.kind === "reattach_existing_runner" ||
-        disposition.kind === "reattach_remote_runner" ||
-        disposition.kind === "resume_dead_runner" ||
-        disposition.kind === "bootstrap_incomplete",
-    );
-    for (const disposition of dispositions) {
-      const run = await getRun(disposition.runId);
-      if (run) {
-        const isClaim =
+      const claims = dispositions.filter(
+        (disposition): disposition is NativeRestartRecoveryClaim =>
           disposition.kind === "reattach_existing_runner" ||
           disposition.kind === "reattach_remote_runner" ||
           disposition.kind === "resume_dead_runner" ||
-          disposition.kind === "bootstrap_incomplete";
-        await appendRunEvent(run, {
-          eventType: "native.recovery.transition",
-          stream: "system",
-          level: disposition.kind === "blocked" ? "warn" : "info",
-          message:
-            disposition.kind === "reattach_existing_runner" ||
-            disposition.kind === "reattach_remote_runner"
-              ? "Recovering the existing native runner process after server restart"
-              : disposition.kind === "resume_dead_runner"
-                ? "Resuming the durable native provider session after runner process loss"
-                : disposition.kind === "bootstrap_incomplete"
-                  ? "Restarting an incomplete native runner bootstrap on the same heartbeat run"
-                  : disposition.kind === "awaiting_evidence"
-                    ? "Native restart recovery is waiting for safe ownership evidence"
-                    : disposition.kind === "already_finalized"
-                      ? "Native restart recovery found an already-finalized result"
-                      : "Native restart recovery blocked ambiguous or conflicting ownership",
-          payload: {
-            restartKind: isClaim ? disposition.restartKind : restartKind,
-            recoveryRequestId: isClaim
-              ? disposition.recoveryRequestId
-              : (intent?.recoveryRequestId ?? null),
-            runnerDisposition: disposition.kind,
-            ...(isClaim
-              ? {
-                  controllerGeneration: disposition.controllerGeneration,
-                  providerAttempt: disposition.providerAttempt,
-                }
-              : { reason: disposition.reason }),
-            ...(disposition.kind === "reattach_existing_runner"
-              ? {
-                  processPid: disposition.process.pid,
-                  processGroupId: disposition.process.processGroupId,
-                  processStartedAt: disposition.process.startedAt,
-                }
-              : {}),
-          },
-        });
-      }
-    }
-    for (const claim of claims) {
-      const execution = executeRun(claim.runId, {
-        nativeLeaseOwner: claim.leaseOwner,
-        nativeRestartRecovery: claim,
-      }).catch((error) => {
-        logger.error(
-          { err: error, runId: claim.runId, disposition: claim.kind },
-          "native restart recovery execution failed",
-        );
-      });
-      activeRunExecutionPromises.add(execution);
-      void execution.finally(() =>
-        activeRunExecutionPromises.delete(execution),
+          disposition.kind === "bootstrap_incomplete",
       );
-    }
+      for (const disposition of dispositions) {
+        const run = await getRun(disposition.runId);
+        if (run) {
+          const isClaim =
+            disposition.kind === "reattach_existing_runner" ||
+            disposition.kind === "reattach_remote_runner" ||
+            disposition.kind === "resume_dead_runner" ||
+            disposition.kind === "bootstrap_incomplete";
+          await appendRunEvent(run, {
+            eventType: "native.recovery.transition",
+            stream: "system",
+            level: disposition.kind === "blocked" ? "warn" : "info",
+            message:
+              disposition.kind === "reattach_existing_runner" ||
+              disposition.kind === "reattach_remote_runner"
+                ? "Recovering the existing native runner process after server restart"
+                : disposition.kind === "resume_dead_runner"
+                  ? "Resuming the durable native provider session after runner process loss"
+                  : disposition.kind === "bootstrap_incomplete"
+                    ? "Restarting an incomplete native runner bootstrap on the same heartbeat run"
+                    : disposition.kind === "awaiting_evidence"
+                      ? "Native restart recovery is waiting for safe ownership evidence"
+                      : disposition.kind === "already_finalized"
+                        ? "Native restart recovery found an already-finalized result"
+                        : "Native restart recovery blocked ambiguous or conflicting ownership",
+            payload: {
+              restartKind: isClaim ? disposition.restartKind : restartKind,
+              recoveryRequestId: isClaim
+                ? disposition.recoveryRequestId
+                : (intent?.recoveryRequestId ?? null),
+              runnerDisposition: disposition.kind,
+              ...(isClaim
+                ? {
+                    controllerGeneration: disposition.controllerGeneration,
+                    providerAttempt: disposition.providerAttempt,
+                  }
+                : { reason: disposition.reason }),
+              ...(disposition.kind === "reattach_existing_runner"
+                ? {
+                    processPid: disposition.process.pid,
+                    processGroupId: disposition.process.processGroupId,
+                    processStartedAt: disposition.process.startedAt,
+                  }
+                : {}),
+            },
+          });
+        }
+      }
+      for (const claim of claims) {
+        const preparationRenewal = preparationRenewals.get(claim.runId);
+        const execution = executeRun(claim.runId, {
+          nativeLeaseOwner: claim.leaseOwner,
+          nativeRestartRecovery: claim,
+        }).catch((error) => {
+          logger.error(
+            { err: error, runId: claim.runId, disposition: claim.kind },
+            "native restart recovery execution failed",
+          );
+        }).finally(() => preparationRenewal?.stop().catch(() => undefined));
+        preparationRenewals.delete(claim.runId); // Execution now owns this reference.
+        activeRunExecutionPromises.add(execution);
+        void execution.finally(() =>
+          activeRunExecutionPromises.delete(execution),
+        );
+      }
 
-    return {
-      restartKind,
-      claims,
-      dispositions,
-      scheduledRetryRunIds: scheduledNativeRetries.map((entry) => entry.runId),
-      awaitingEvidenceRunIds: dispositions
-        .filter((entry) => entry.kind === "awaiting_evidence")
-        .map((entry) => entry.runId),
-      blockedRunIds: dispositions
-        .filter((entry) => entry.kind === "blocked")
-        .map((entry) => entry.runId),
-    };
+      return {
+        restartKind,
+        claims,
+        dispositions,
+        scheduledRetryRunIds: scheduledNativeRetries.map((entry) => entry.runId),
+        awaitingEvidenceRunIds: dispositions
+          .filter((entry) => entry.kind === "awaiting_evidence")
+          .map((entry) => entry.runId),
+        blockedRunIds: dispositions
+          .filter((entry) => entry.kind === "blocked")
+          .map((entry) => entry.runId),
+      };
+    } finally {
+      // A failed scan or audit write must not keep abandoned claims alive.
+      await Promise.all([...preparationRenewals.values()].map(renewal => renewal.stop().catch(() => undefined)));
+    }
   }
 
   async function drainRunningRunsForShutdown(

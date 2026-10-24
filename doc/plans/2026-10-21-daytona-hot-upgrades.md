@@ -491,3 +491,18 @@ The recovery integration suite accepts `PAPERCLIP_TEST_DATABASE_URL` for an
 explicit disposable Postgres instance when native embedded Postgres is unavailable.
 It creates and removes a fresh database for each invocation; it does not reuse the
 URL's database as fixture storage. This option changes test setup only.
+
+### Claim-to-attachment lease lifetime (2026-10-24)
+
+A durable remote recovery starts renewal immediately after each claim commits,
+before the remainder of the recovery scan, audit writes, or heartbeat preparation.
+Preparation and the native executor share one timer for the same authority. Each
+releases its own reference; failed scans release undispatched claims. Renewal
+never queues behind a pending SQL operation and cannot revive an expired lease.
+A lost remote authority detaches without stopping its sandbox execution.
+
+The real-Postgres regression waits past the original claim expiry without editing
+that lease, transfers the renewal reference to execution, and verifies a competing
+controller cannot take over. Unit gates prove one renewal per interval and zero
+SQL after the final release. The plugin adoption lifecycle fixture now uses the
+current `adoptIdentity` contract and cleans up its owned database.

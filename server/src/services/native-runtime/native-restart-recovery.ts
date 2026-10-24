@@ -476,6 +476,10 @@ export async function claimNativeRestartRecoveries(input: {
   runIds?: string[];
   now?: Date;
   limit?: number;
+  /** Called after each committed claim, before scanning the next candidate. */
+  onClaim?: (claim: NativeRestartRecoveryClaim, scope: {
+    companyId: string; issueId: string; controller: NativeControllerIdentity; remote: boolean;
+  }) => void;
   coordinatedPreviousController?: {
     pid: number;
     processStartedAt: Date | null;
@@ -523,6 +527,8 @@ export async function claimNativeRestartRecoveries(input: {
 
   const dispositions: NativeRestartRecoveryDisposition[] = [];
   for (const candidate of candidates) {
+    const now = input.now ?? new Date();
+    let claimScope: { companyId: string; issueId: string; controller: NativeControllerIdentity; remote: boolean } | undefined;
     // Set inside the transaction only when the write below genuinely
     // transitions the run into "failed". Read after the transaction
     // commits, so a rolled-back write never reports a false failure.
@@ -1061,6 +1067,7 @@ export async function claimNativeRestartRecoveries(input: {
         })
         .where(eq(heartbeatRuns.id, row.run.id));
 
+      claimScope = { companyId: row.run.companyId, issueId: row.coordinator.issueId, controller, remote: Boolean(durableAuthority) };
       const common = {
         runId: row.run.id,
         leaseOwner,
@@ -1097,6 +1104,7 @@ export async function claimNativeRestartRecoveries(input: {
     });
     if (terminalRunToReport)
       void reportRunFailure(input.db, terminalRunToReport);
+    if (claimScope && "leaseOwner" in disposition) input.onClaim?.(disposition, claimScope);
     dispositions.push(disposition);
   }
   return dispositions;
