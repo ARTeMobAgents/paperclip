@@ -3,6 +3,7 @@ import {
   heartbeatRuns,
   companyMemberships,
   connectionGrantDelegations,
+  connectionGrantMembers,
   connectionGrants,
   toolConnectionInstalls,
   toolConnections,
@@ -348,7 +349,7 @@ export async function resolveManagedGitHubIdentitySelection(
   // targets. Within that consent boundary the server-resolved responsible user
   // is authoritative; standing delegation is only an ownerless-run fallback.
   const personal = context.responsibleUserId
-    ? grants.filter((grant) => grant.kind === "user" && grant.subjectUserId === context.responsibleUserId && grant.status === "active")
+    ? grants.filter((grant) => grant.kind === "user" && grant.subjectUserId === context.responsibleUserId)
     : [];
   const delegated = context.allowStandingDelegation !== false && !context.responsibleUserId && context.agentId
     ? await db.select({ grantId: connectionGrantDelegations.grantId }).from(connectionGrantDelegations).where(and(
@@ -360,12 +361,46 @@ export async function resolveManagedGitHubIdentitySelection(
         return grants.filter((grant) => grant.kind === "user" && delegatedIds.has(grant.id));
       })
     : [];
-  // A shared company authorization is available to installed agents when no
-  // active personal identity or standing delegation applies. A revoked personal
-  // grant must not hide that authorized company connection.
-  const organization = grants.filter((grant) => grant.kind === "organization" && grant.isDefault && grant.status === "active");
-  const candidates = dedicated.length > 0 ? dedicated : personal.length > 0 ? personal : delegated.length > 0 ? delegated : organization;
+  // Organization grants are eligible only inside their own company and audience.
+  // The connection install alone does not authorize a restricted grant audience.
+  const organizationGrants = grants.filter((grant) => grant.kind === "organization" && grant.isDefault && grant.status === "active");
+  const audienceRows = organizationGrants.length > 0
+    ? await db.select({ grantId: connectionGrantMembers.grantId, subjectId: connectionGrantMembers.subjectId })
+        .from(connectionGrantMembers).where(and(
+          eq(connectionGrantMembers.companyId, companyId),
+          inArray(connectionGrantMembers.grantId, organizationGrants.map((grant) => grant.id)),
+          eq(connectionGrantMembers.subjectType, "user"),
+        ))
+    : [];
+  const [responsibleMember] = context.responsibleUserId && organizationGrants.length > 0
+    ? await db.select({ role: companyMemberships.membershipRole }).from(companyMemberships).where(and(
+        eq(companyMemberships.companyId, companyId),
+        eq(companyMemberships.principalType, "user"),
+        eq(companyMemberships.principalId, context.responsibleUserId),
+        eq(companyMemberships.status, "active"),
+      )).limit(1)
+    : [];
+  const organization = organizationGrants.filter((grant) => {
+    const audience = audienceRows.filter((row) => row.grantId === grant.id);
+    if (context.responsibleUserId && (!responsibleMember || responsibleMember.role === "viewer")) return false;
+    return audience.length === 0 || Boolean(context.responsibleUserId && audience.some((row) => row.subjectId === context.responsibleUserId));
+  });
+  const activePersonal = personal.filter((grant) => grant.status === "active");
+  const revokedPersonal = personal.length > 0 && personal.every((grant) => grant.status === "revoked");
+  // Revocation does not switch the actor by default. An owner must explicitly
+  // enable this exception on the shared connection; other failures stay closed.
+  const optedInOrganization = revokedPersonal ? organization.filter((grant) => {
+    const connection = githubConnections.find((candidate) => candidate.id === grant.connectionId);
+    const config = connection?.config && typeof connection.config === "object" ? connection.config as Record<string, unknown> : {};
+    return config.managedGitHubOrganizationFallbackOnRevokedPersonal === true;
+  }) : organization;
+  const candidates = dedicated.length > 0 ? dedicated
+    : activePersonal.length > 0 ? activePersonal
+    : personal.length > 0 && !revokedPersonal ? personal
+    : personal.length > 0 ? optedInOrganization.length > 0 ? optedInOrganization : personal
+    : delegated.length > 0 ? delegated : organization;
   const identitySource = dedicated.length > 0 ? "dedicated" as const
+    : candidates.some((grant) => grant.kind === "organization") ? "organization" as const
     : personal.length > 0 || delegated.length > 0 ? "personal" as const : "organization" as const;
   // Reconnecting can create another connection/grant for the same GitHub
   // account. Ambiguity is about provider identities, not the number of rows.

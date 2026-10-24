@@ -4096,7 +4096,7 @@ export function createToolGatewayService(
             github: {
               status: "available",
               login: grant.providerTenant?.github?.login,
-              source: grant.kind === "agent" ? "dedicated" : "personal",
+              source: grant.kind === "agent" ? "dedicated" : grant.kind === "organization" ? "organization" : "personal",
               connectionId: connection.id,
               grantId: grant.id,
               authenticationMode: "managed",
@@ -4117,7 +4117,7 @@ export function createToolGatewayService(
             github: {
               status: "unavailable",
               reason: "GitHub authorization is unavailable",
-              source: grant.kind === "agent" ? "dedicated" : "personal",
+              source: grant.kind === "agent" ? "dedicated" : grant.kind === "organization" ? "organization" : "personal",
             },
           })
           .where(
@@ -4625,6 +4625,27 @@ export function createToolGatewayService(
             "The personal grant owner is not an authorized company member",
             "grant_owner_membership_inactive",
           );
+        }
+      }
+      if (selected.grant.kind === "organization") {
+        const audience = await db.select({ subjectId: connectionGrantMembers.subjectId })
+          .from(connectionGrantMembers).where(and(
+            eq(connectionGrantMembers.companyId, session.companyId),
+            eq(connectionGrantMembers.grantId, selected.grant.id),
+            eq(connectionGrantMembers.subjectType, "user"),
+          ));
+        const [member] = session.responsibleUserId
+          ? await db.select({ role: companyMemberships.membershipRole }).from(companyMemberships).where(and(
+              eq(companyMemberships.companyId, session.companyId),
+              eq(companyMemberships.principalType, "user"),
+              eq(companyMemberships.principalId, session.responsibleUserId),
+              eq(companyMemberships.status, "active"),
+            )).limit(1)
+          : [];
+        if (!isConnectionGrantAudienceAllowed(
+          audience.map((row) => row.subjectId), session.responsibleUserId ?? null, Boolean(member && member.role !== "viewer"),
+        )) {
+          throw new ToolGatewayHttpError(403, "The acting user is not in this grant's audience", "grant_audience_denied");
         }
       }
       // Managed GitHub selection is final: a legacy shared policy cannot replace
