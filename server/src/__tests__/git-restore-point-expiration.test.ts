@@ -404,6 +404,16 @@ describeEmbeddedPostgres("git restore point expiration", () => {
       expect(await f.ledger()).toMatchObject([{ status: "active" }]);
     });
 
+    it("times the restore point from the issues that use the workspace once every child is closed", async () => {
+      const f = await fixture();
+      await makeUnsavedWork(f.cwd);
+      const closed = await child(f, { status: "done", completedAt: new Date(Date.now() - 60_000) });
+      await ownWorkspace(f, closed);
+      expect(await worker().sweepTerminalWorkspaces()).toMatchObject({ archived: 1 });
+      expect(await exists(f.cwd)).toBe(false);
+      expect(await f.ledger()).toMatchObject([{ status: "active" }]);
+    });
+
     it("waits for the terminal delay of a recently closed child that used the workspace", async () => {
       const f = await fixture();
       await makeUnsavedWork(f.cwd);

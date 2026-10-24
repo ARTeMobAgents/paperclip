@@ -3437,7 +3437,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         const treeOpen = issueTree.some(issue => !TERMINAL_ISSUE_STATUSES.has(issue.status));
         const gitExpirationCandidate = workspace.providerType !== "plugin" && Boolean(opts.gitCacheExpirationEnabled)
           && (hasPendingGitExpiration(workspace) || (workspace.mode === "isolated_workspace" && workspace.strategyType === "git_worktree"));
-        const usingIssueIds = sourceIssue && treeOpen && gitExpirationCandidate && !reopenPending
+        const usingIssueIds = sourceIssue && gitExpirationCandidate && !reopenPending
           && TERMINAL_ISSUE_STATUSES.has(sourceIssue.status)
           ? await listIssuesUsingGitWorkspace(db, workspace, issueTree.map(issue => issue.id)) : null;
         const expirationTree = usingIssueIds ? issueTree.filter(issue => usingIssueIds.has(issue.id)) : issueTree;
@@ -3480,7 +3480,8 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           result.skippedNonTerminalTree += 1;
           continue;
         }
-        const latestTerminalAt = Math.max(...expirationTree.map(issue => issueTerminalTimestamp(issue)!.getTime()));
+        const expirationTerminalAt = Math.max(...expirationTree.map(issue => issueTerminalTimestamp(issue)!.getTime()));
+        const latestTerminalAt = treeOpen ? expirationTerminalAt : Math.max(...issueTree.map(issue => issueTerminalTimestamp(issue)!.getTime()));
         // Compaction runs once per terminal cycle, after its own delay and
         // before the archive cooldown, so a workspace the reaper cannot archive
         // yet (or ever) stops holding regenerable files.
@@ -3517,7 +3518,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
             now: now(), signal, beforeDelete: opts.beforeTerminalWorkspaceCleanup,
             restorePoint: opts.gitRestorePoints ? {
               storage: opts.gitRestorePoints.storage,
-              notBefore: new Date(latestTerminalAt + opts.gitRestorePoints.terminalDelayMs),
+              notBefore: new Date(expirationTerminalAt + opts.gitRestorePoints.terminalDelayMs),
               keyDurable: opts.gitRestorePoints.keyDurable,
             } : undefined,
           });
