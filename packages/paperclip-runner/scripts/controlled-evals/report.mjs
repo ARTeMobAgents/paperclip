@@ -4,16 +4,27 @@ import { pathToFileURL } from 'node:url';
 import { canonical, costRuntime, readJson, requestBindingSha256, sha256, units, usd, validateManifest } from './manifest.mjs';
 import { attemptDirectory } from './run.mjs';
 
-export async function summarizeControlledCampaign(value) {
+export async function summarizeControlledCampaign(value, { filesByAttempt } = {}) {
   const { manifest, manifestSha256, allocatedUsd, overheadUsd } = validateManifest(value, Date.now(), { admission: false });
   let known = 0n, committed = units(overheadUsd);
   const attempts = [];
   for (const allocation of manifest.attempts) {
     const root = attemptDirectory(manifest, allocation.attemptId);
+    const readEvidence = async name => {
+      if (filesByAttempt === undefined) return readFile(join(root, name));
+      const bytes = filesByAttempt.get(allocation.attemptId)?.get(name);
+      if (!Buffer.isBuffer(bytes)) throw new Error('Missing archived controller evidence');
+      return bytes;
+    };
+    const readDocument = async (name, maximum = 1_048_576) => {
+      const bytes = await readEvidence(name);
+      if (bytes.length > maximum) throw new Error('Controller document exceeds its byte limit');
+      return JSON.parse(bytes.toString('utf8'));
+    };
     let snapshot, report, verified = false;
     try {
-      const ledgerBytes = await readFile(join(root, 'ledger.jsonl'));
-      const ledger = await costRuntime.readEvalCostLedger(join(root, 'ledger.jsonl'));
+      const ledgerBytes = await readEvidence('ledger.jsonl');
+      const ledger = costRuntime.parseEvalCostLedger(ledgerBytes.toString('utf8'));
       const candidateSnapshot = ledger.state.snapshot();
       const ledgerDeadline = Date.parse(ledger.state.limits.deadlineAt);
       const fixedLimits = { campaignId: manifest.campaignId, maxUsd: allocation.maxUsd, deadlineAt: ledger.state.limits.deadlineAt,
@@ -23,7 +34,7 @@ export async function summarizeControlledCampaign(value) {
           || canonical(candidateSnapshot.admittedAttempts) !== canonical([{ executionId: allocation.executionId, attemptId: allocation.attemptId }])
           || candidateSnapshot.requests.some(request => request.executionId !== allocation.executionId || request.attemptId !== allocation.attemptId || request.phase !== 'agent')) throw new Error('Ledger identity does not match its allocation');
       snapshot = candidateSnapshot;
-      const admission = await readJson(join(root, 'admission.json'));
+      const admission = await readDocument('admission.json');
       const started = Date.parse(admission.startedAt);
       const expectedLimits = { campaignId: manifest.campaignId, maxUsd: allocation.maxUsd,
         deadlineAt: new Date(Math.min(Date.parse(manifest.deadlineAt), started + allocation.timeoutMs)).toISOString(),
@@ -31,20 +42,20 @@ export async function summarizeControlledCampaign(value) {
       if (admission.schema !== 'paperclip.runner-eval.admission/v1' || admission.manifestSha256 !== manifestSha256
           || admission.campaignId !== manifest.campaignId || canonical(admission.attempt) !== canonical(allocation)
           || canonical(admission.limits) !== canonical(expectedLimits) || canonical(ledger.state.limits) !== canonical(expectedLimits)) throw new Error('Ledger does not match its admission');
-      report = await readJson(join(root, 'result.json'));
-      const request = await readJson(join(root, 'request.json'), 8_388_608);
+      report = await readDocument('result.json');
+      const request = await readDocument('request.json', 8_388_608);
       if (requestBindingSha256(request) !== allocation.requestSha256 || request.runnerd.sha256.replace(/^sha256:/, '') !== manifest.runnerd.sha256
           || canonical(Object.keys(report.receiptHashes ?? {}).sort()) !== canonical(snapshot.requests.map(item => item.requestId).sort())) throw new Error('Retained request evidence does not match');
       for (const item of snapshot.requests) {
         if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(item.requestId)) throw new Error('Invalid retained receipt identity');
-        const bytes = await readFile(join(root, 'receipts', `${item.requestId}.json`));
+        const bytes = await readEvidence(`receipts/${item.requestId}.json`);
         const receipt = JSON.parse(bytes.toString('utf8'));
         if (sha256(bytes) !== report.receiptHashes[item.requestId] || receipt.requestId !== item.requestId
             || receipt.route !== manifest.route || receipt.costUsd !== item.costUsd) throw new Error('Retained receipt does not match its ledger');
       }
-      const artifactBytes = await readFile(join(root, 'provider-artifact.json'));
+      const artifactBytes = await readEvidence('provider-artifact.json');
       const artifact = JSON.parse(artifactBytes.toString('utf8'));
-      const descriptorBytes = await readFile(join(root, 'gateway.json'));
+      const descriptorBytes = await readEvidence('gateway.json');
       const descriptor = JSON.parse(descriptorBytes.toString('utf8'));
       if (report.schema !== 'paperclip.runner-eval.control-result/v1' || report.manifestSha256 !== manifestSha256
           || report.campaignId !== manifest.campaignId || report.executionId !== allocation.executionId || report.attemptId !== allocation.attemptId

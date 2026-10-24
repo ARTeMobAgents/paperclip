@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { canonical, costRuntime, requestBindingSha256, sha256, validateManifest } from './manifest.mjs';
 import { attemptDirectory, runControlledEval } from './run.mjs';
 import { summarizeControlledCampaign } from './report.mjs';
+import { decodeControlledEvidence, packControlledAttempt, readControlledEvidence, summarizeControlledEvidence } from './archive.mjs';
+import { aggregateProtocolEvalCampaign, sanitizeProtocolEvalRuns } from '../runner-protocol-eval-campaign.mjs';
 
 const childScript = options => `
 import assert from 'node:assert/strict';
@@ -276,4 +278,127 @@ test('cancellation still kills an owned resistant descendant after the CLI exits
   assert.equal(absent(), true);
   assert.equal(result.report.cleanupVerified, false);
   assert.equal((await summarizeControlledCampaign(f.manifest)).committedUsd, '0.014000000');
+});
+
+
+test('portable archives replay after worker deletion, deduplicate attempts, and hold absent cells', async t => {
+  const f = await fixture(t, { count: 2, requests: 1 });
+  await f.run(0);
+  const first = await packControlledAttempt({ manifest: f.manifest, attemptId: 'attempt-0', environment: f.environment });
+  const partial = await summarizeControlledEvidence([first, first]);
+  assert.equal(partial.incompleteAttempts, 1);
+  assert.equal(partial.knownUsd, '0.000068000');
+  assert.equal(partial.committedUsd, '0.014068000');
+  await f.run(1);
+  const second = await packControlledAttempt({ manifest: f.manifest, attemptId: 'attempt-1' });
+  const expected = await summarizeControlledCampaign(f.manifest);
+  await rm(f.manifest.outputDirectory, { recursive: true });
+  const restored = await summarizeControlledEvidence([first, second, first]);
+  assert.deepEqual(restored.campaigns, [expected]);
+  assert.equal(restored.operatingHeldUsd, '0.004000000');
+  assert.equal(restored.knownUsd, '0.000136000');
+  assert.equal(restored.costStatus, 'provisional');
+});
+
+test('archived partial proof preserves known costs without consulting intact worker files', async t => {
+  const f = await fixture(t, { requests: 1 }); await f.run();
+  const bundle = await packControlledAttempt({ manifest: f.manifest, attemptId: 'attempt-0' });
+  for (const name of ['admission.json', 'request.json', 'result.json', Object.keys(bundle.files).find(name => name.startsWith('receipts/'))]) {
+    const partial = structuredClone(bundle); delete partial.files[name];
+    const summary = await summarizeControlledEvidence([partial]);
+    assert.equal(summary.incompleteAttempts, 1, name);
+    assert.equal(summary.knownUsd, '0.000068000', name);
+    assert.equal(summary.committedUsd, '0.014000000', name);
+  }
+  const absent = await packControlledAttempt({ manifest: f.manifest, attemptId: 'attempt-0' });
+  absent.files = {};
+  assert.equal((await summarizeControlledEvidence([absent])).committedUsd, '0.014000000');
+});
+
+test('archive creation retains never-started selections and refuses nonregular or oversized proof', async t => {
+  const f = await fixture(t);
+  const empty = await packControlledAttempt({ manifest: f.manifest, attemptId: 'attempt-0' });
+  assert.deepEqual(empty.files, {});
+  assert.equal((await summarizeControlledEvidence([empty])).heldUsd, '0.014000000');
+  await f.run();
+  const root = attemptDirectory(f.manifest, 'attempt-0');
+  await rm(join(root, 'stderr.log'));
+  await symlink(f.manifest.runnerCli.path, join(root, 'stderr.log'));
+  await assert.rejects(packControlledAttempt({ manifest: f.manifest, attemptId: 'attempt-0' }));
+  await rm(join(root, 'stderr.log'));
+  await writeFile(join(root, 'stderr.log'), Buffer.alloc(1_048_577));
+  await assert.rejects(packControlledAttempt({ manifest: f.manifest, attemptId: 'attempt-0' }), /bounded regular file/);
+});
+
+test('archive validation rejects corruption, traversal, and conflicting campaign or attempt evidence', async t => {
+  const f = await fixture(t, { requests: 1 }); await f.run();
+  const bundle = await packControlledAttempt({ manifest: f.manifest, attemptId: 'attempt-0' });
+  for (const mutate of [
+    b => { b.manifest.campaignId = 'other'; },
+    b => { b.files['ledger.jsonl'].base64 = 'x' + b.files['ledger.jsonl'].base64.slice(1); },
+    b => { b.files['../outside'] = b.files['ledger.jsonl']; },
+    b => { b.files['stderr.log'].sizeBytes = -1; },
+  ]) { const b = structuredClone(bundle); mutate(b); assert.throws(() => decodeControlledEvidence(b)); }
+  const conflict = structuredClone(bundle); delete conflict.files['stderr.log'];
+  await assert.rejects(summarizeControlledEvidence([bundle, conflict]), /Conflicting controller attempt/);
+  const other = structuredClone(bundle); other.manifest.maxUsd = '2'; other.manifestSha256 = sha256(canonical(other.manifest));
+  await assert.rejects(summarizeControlledEvidence([bundle, other]), /Conflicting controller campaign/);
+});
+
+test('configured credentials are excluded before encoding and after archive decoding', async t => {
+  const f = await fixture(t); await f.run();
+  const root = attemptDirectory(f.manifest, 'attempt-0');
+  const secret = 'synthetic-braintrust-archive-secret';
+  const environment = { BRAINTRUST_API_KEY: secret };
+  await writeFile(join(root, 'stderr.log'), secret);
+  await assert.rejects(packControlledAttempt({ manifest: f.manifest, attemptId: 'attempt-0', environment }), /configured credential/);
+  const unchecked = await packControlledAttempt({ manifest: f.manifest, attemptId: 'attempt-0', environment: {} });
+  assert(!JSON.stringify(unchecked).includes(secret));
+  assert.throws(() => decodeControlledEvidence(unchecked, { environment }), /configured credential/);
+  const file = join(f.root, 'archive.json'); await writeFile(file, JSON.stringify(unchecked));
+  await assert.rejects(readControlledEvidence(file, { environment }), /configured credential/);
+});
+
+test('campaign collection retains and audits private archives, while public projection omits them', async t => {
+  const f = await fixture(t, { requests: 1 }); await f.run();
+  const bundle = await packControlledAttempt({ manifest: f.manifest, attemptId: 'attempt-0' });
+  const download = join(f.root, 'downloads', 'cell'), attempt = join(download, 'runs', 'attempt-0');
+  await mkdir(attempt, { recursive: true });
+  const evalCase = { id: 'case-0', checks: [] }, config = { model: 'fixture', provider: 'codex', driver: 'codex_app_server' };
+  for (const [name, value] of Object.entries({
+    'request.json': f.requests[0].request,
+    'artifact.json': JSON.parse(await readFile(f.requests[0].outputPath, 'utf8')),
+    'score.json': { attemptId: 'attempt-0', caseId: evalCase.id, passed: true, disposition: 'passed', checks: [] },
+    'case.json': evalCase, 'config.json': config, 'controller-evidence.json': bundle,
+  })) await writeFile(join(attempt, name), JSON.stringify(value));
+  const cell = { cellId: 'execution-0', caseId: evalCase.id, rosterFile: 'roster.json', rosterId: 'roster-0', ...config };
+  const catalogPath = join(f.root, 'catalog.json');
+  await writeFile(catalogPath, JSON.stringify({ schema: 'paperclip.runner-protocol-eval.catalog/v1', campaignId: f.manifest.campaignId,
+    selection: { kind: 'subset' }, cells: [cell], rosters: [{ ...cell, cases: [evalCase.id] }] }));
+  await writeFile(join(download, 'cell.json'), JSON.stringify({ ...cell, exitCode: 0 }));
+  await rm(f.manifest.outputDirectory, { recursive: true });
+  const input = { catalogPath, downloadsRoot: join(f.root, 'downloads'), evalsRoot: f.root,
+    runsOut: join(f.root, 'collected'), campaignOut: join(f.root, 'campaign.json'),
+    source: { paperclip: { sha: f.manifest.sourceRevision }, evals: { sha: f.manifest.definitionsRevision } } };
+  const result = await aggregateProtocolEvalCampaign(input);
+  assert.equal(result.controlledCosts.knownUsd, '0.000068000');
+  assert.equal(result.controlledCosts.costStatus, 'provisional');
+  assert.deepEqual(JSON.parse(await readFile(join(input.runsOut, 'attempt-0', 'controller-evidence.json'), 'utf8')), bundle);
+  const publicRoot = join(f.root, 'public');
+  await sanitizeProtocolEvalRuns({ runsRoot: input.runsOut, publicRunsRoot: publicRoot });
+  assert.deepEqual((await readdir(join(publicRoot, 'attempt-0'))).sort(), ['artifact.json', 'case.json', 'config.json', 'score.json']);
+  assert(!(await readFile(join(publicRoot, 'attempt-0', 'artifact.json'), 'utf8')).includes('controllerAccounting'));
+  const changedRequest = { ...f.requests[0].request, prompt: 'copied from another execution' };
+  await writeFile(join(attempt, 'request.json'), JSON.stringify(changedRequest));
+  await assert.rejects(aggregateProtocolEvalCampaign(input), /Immutable attempt does not match/);
+  await writeFile(join(attempt, 'request.json'), JSON.stringify(f.requests[0].request));
+  const drifted = structuredClone(bundle); drifted.manifest.attempts[0].executionId = 'not-the-selected-cell';
+  drifted.manifestSha256 = sha256(canonical(drifted.manifest));
+  await writeFile(join(attempt, 'controller-evidence.json'), JSON.stringify(drifted));
+  const bareArtifact = JSON.parse(await readFile(join(attempt, 'artifact.json'), 'utf8')); delete bareArtifact.controllerAccounting;
+  await writeFile(join(attempt, 'artifact.json'), JSON.stringify(bareArtifact));
+  await assert.rejects(aggregateProtocolEvalCampaign(input), /Controller archive identity drifted/);
+  await writeFile(join(attempt, 'artifact.json'), await readFile(f.requests[0].outputPath));
+  await rm(join(attempt, 'controller-evidence.json'));
+  await assert.rejects(aggregateProtocolEvalCampaign(input), /Missing private controller evidence/);
 });

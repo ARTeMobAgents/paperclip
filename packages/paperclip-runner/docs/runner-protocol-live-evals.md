@@ -215,14 +215,56 @@ Each result retains `controllerAccounting` alongside the original provider
 outcome and usage. Retain the durable controller directory as private evidence:
 its admission, request, gateway descriptor, request receipts, ledger, original
 provider artifact, and final result are required for reconciliation. The
-private program's existing immutable attempt copy includes the result metadata;
-its current default history publisher does not archive this separate directory.
-Do not infer receipt retention from that metadata alone.
+private `controller-evidence.json` bundle can travel with the immutable attempt.
+Set `PAPERCLIP_RUNNER_EVAL_ARCHIVE_CLI` to the sibling `archive.mjs` when using a
+private eval program with controller retention support. That program validates
+the request before launch, captures the bundle before finalizing the attempt,
+and marks missing or incomplete capture as a non-retryable accounting failure.
+It must use zero infrastructure retries. Older private programs do not capture
+this bundle; result metadata alone is not proof of retention.
 
 ```sh
 node packages/paperclip-runner/scripts/controlled-evals/report.mjs \
   /private/path/controller-manifest.json > /private/path/controller-report.json
 ```
+
+To retain or inspect the evidence independently of the original worker:
+
+```sh
+node packages/paperclip-runner/scripts/controlled-evals/archive.mjs pack \
+  /private/path/controller-manifest.json attempt-id \
+  /private/path/runs/attempt-id/controller-evidence.json
+node packages/paperclip-runner/scripts/controlled-evals/archive.mjs report-attempts \
+  /private/path/runs/attempt-id
+```
+
+`pack` is exclusive and never overwrites evidence. The private bundle contains
+the full manifest and exact bytes of the admission, request, gateway descriptor,
+ledger, receipts, provider artifact, result, and bounded stdout/stderr. It omits
+executables, private homes, and caches. Files carry byte lengths and SHA-256
+hashes. These detect corruption; they are not signatures or proof against a
+host that can rewrite all evidence. Known configured credential values are
+checked before encoding and after decoding. Keep bundles private.
+
+The reader accepts only bounded regular files and fixed evidence paths. A
+bundle is limited to 64 MiB of decoded content plus encoding overhead; this
+storage-format limit does not qualify a vendor charge or operating-cost bound.
+`report` accepts standalone bundle files; `report-attempts` additionally binds
+them to the surrounding immutable request and artifact. Both work after the
+original worker directory is gone, using the same hash-chain ledger verifier.
+They group attempts by manifest, count operating holds once, deduplicate exact
+copies, reject conflicting copies, and keep full allocations for missing
+selected attempts. They never consult old worker paths to fill archive gaps.
+
+The campaign collector preserves the bundle in private runs and returns its
+independently replayed totals as `controlledCosts`. For this collector, each
+manifest `executionId` must equal its catalog `cellId`, and the complete
+manifest selection must match the catalog. Extra attempts are rejected.
+Existing `costs` remain
+legacy provider-usage observations; do not add them to `controlledCosts`.
+The public attempt projection omits bundles and raw `controllerAccounting`.
+Private reports label ledger-known amounts and conservative holds as provisional
+or incomplete; a missing verifier or invalid evidence cannot become a zero cost.
 
 The report recomputes ledger costs, checks their attempt/manifest bindings, and
 preserves known partial charges. It reports operating costs as held and total

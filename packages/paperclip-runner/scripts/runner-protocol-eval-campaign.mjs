@@ -26,6 +26,7 @@ const ATTEMPT_FILES = new Set([
   "compiled-fixture.json",
   "case.json",
   "config.json",
+  "controller-evidence.json",
 ]);
 
 function json(value) {
@@ -405,6 +406,7 @@ export async function aggregateProtocolEvalCampaign({
     catalog.cells.map((cell) => [cell.cellId, cell]),
   );
   const copiedAttemptIds = new Set();
+  const controllerBundles = [];
   for (const statusPath of await findFiles(downloadsRoot, "cell.json")) {
     const status = await loadObject(statusPath);
     const cellId = safeId(status.cellId, "recorded cell ID");
@@ -452,6 +454,25 @@ export async function aggregateProtocolEvalCampaign({
           (config.driver ?? "codex_app_server") !== expected.driver
         ) {
           throw new Error(`Downloaded attempt identity drifted for ${cellId}`);
+        }
+        const bundlePath = join(attemptRoot, entry.name, "controller-evidence.json");
+        const bundleStat = await lstat(bundlePath).catch(error => {
+          if (error.code === "ENOENT") return null;
+          throw error;
+        });
+        if (bundleStat) {
+          const { readAttemptControlledEvidence } = await import("./controlled-evals/archive.mjs");
+          const bundle = await readAttemptControlledEvidence(join(attemptRoot, entry.name));
+          const allocation = bundle.manifest.attempts.find(item => item.attemptId === attemptId);
+          const selectedExecutions = new Set(bundle.manifest.attempts.map(item => item.executionId));
+          if (bundle.manifest.campaignId !== catalog.campaignId || allocation.executionId !== cellId ||
+              selectedExecutions.size !== expectedByCell.size || [...expectedByCell.keys()].some(id => !selectedExecutions.has(id)) ||
+              bundle.manifest.sourceRevision !== source.paperclip.sha || bundle.manifest.definitionsRevision !== source.evals.sha) {
+            throw new Error(`Controller archive identity drifted for ${cellId}`);
+          }
+          controllerBundles.push(bundle);
+        } else if (artifact.controllerAccounting) {
+          throw new Error(`Missing private controller evidence for ${attemptId}; cost metadata alone is insufficient`);
         }
         await copyAttempt(
           join(attemptRoot, entry.name),
@@ -518,6 +539,15 @@ export async function aggregateProtocolEvalCampaign({
       (result) => result.disposition === "infrastructure_failure",
     ).length,
   };
+  let controlledCosts;
+  if (controllerBundles.length) {
+    const { summarizeControlledEvidence } = await import("./controlled-evals/archive.mjs");
+    controlledCosts = await summarizeControlledEvidence(controllerBundles);
+    const allocatedAttempts = new Set(controlledCosts.campaigns.flatMap(campaign => campaign.attempts.map(attempt => attempt.attemptId)));
+    if ([...copiedAttemptIds].some(id => !allocatedAttempts.has(id))) {
+      throw new Error("Retained attempt is outside the controlled campaign allocation");
+    }
+  }
   const generatedAt = new Date().toISOString();
   const campaign = {
     schema: "paperclip.runner-protocol-eval.campaign/v1",
@@ -525,6 +555,7 @@ export async function aggregateProtocolEvalCampaign({
     generatedAt,
     selection: catalog.selection,
     costs: sumAttemptCosts(attemptUsages),
+    ...(controlledCosts ? { controlledCosts } : {}),
     source: {
       paperclip: source.paperclip,
       evals: source.evals,
