@@ -498,3 +498,15 @@ not delivered by it.
 The controlled Codex profile disables web search. The shared proxy accepts local
 function/custom tool namespaces and still rejects hosted tools, including any
 hidden inside a namespace. These routes do not qualify web-search charges.
+
+The controller stages the exact verified CLI and daemon bytes in its private
+attempt directory. A Node module-resolution hook keeps the CLI's relative
+imports pointed at the trusted source checkout; it does not reload the original
+entry file. Installed dependencies still belong to that trusted checkout. The
+staged copies are removed after verified process cleanup and kept if cleanup is
+incomplete. This path requires the repository's Node 24.11+ runtime.
+
+Campaign reports verify the retained request binding and the digest of every
+request receipt before reducing a cell's allocation. Missing admission, request,
+or receipt evidence preserves known ledger charges and holds the rest of the
+full allocation.

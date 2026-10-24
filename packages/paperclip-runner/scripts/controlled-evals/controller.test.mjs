@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { canonical, costRuntime, requestBindingSha256, sha256, validateManifest } from './manifest.mjs';
@@ -197,4 +198,42 @@ test('existing outputs and physical workspace aliases are rejected before provid
   await symlink(f.requests[0].request.session.workingDirectory, f.manifest.outputDirectory); await f.save();
   await assert.rejects(f.run(0, transport), /resolves inside/);
   assert.equal(calls, 0);
+});
+
+for (const missing of ['request.json', 'admission.json', 'receipt']) test(`lost ${missing} keeps known charges and the full allocation`, async t => {
+  const f = await fixture(t, { requests: 1 }); await f.run();
+  const root = attemptDirectory(f.manifest, 'attempt-0');
+  const file = missing === 'receipt' ? join(root, 'receipts', (await readdir(join(root, 'receipts')))[0]) : join(root, missing);
+  await rm(file);
+  const summary = await summarizeControlledCampaign(f.manifest);
+  assert.equal(summary.knownUsd, '0.000068000');
+  assert.equal(summary.committedUsd, '0.014000000');
+  assert.equal(summary.incompleteAttempts, 1);
+});
+
+for (const changed of ['request', 'receipt']) test(`changed ${changed} evidence cannot release the allocation`, async t => {
+  const f = await fixture(t, { requests: 1 }); await f.run();
+  const root = attemptDirectory(f.manifest, 'attempt-0');
+  const file = changed === 'receipt' ? join(root, 'receipts', (await readdir(join(root, 'receipts')))[0]) : join(root, 'request.json');
+  const value = JSON.parse(await readFile(file, 'utf8'));
+  if (changed === 'request') value.prompt = 'different request'; else value.costUsd = '0.000000000';
+  await writeFile(file, JSON.stringify(value));
+  const summary = await summarizeControlledCampaign(f.manifest);
+  assert.equal(summary.knownUsd, '0.000068000');
+  assert.equal(summary.committedUsd, '0.014000000');
+  assert.equal(summary.incompleteAttempts, 1);
+});
+
+for (const replaced of ['runnerCli', 'runnerd']) test(`launches verified bytes after the original ${replaced} path is replaced`, async t => {
+  const f = await fixture(t, { requests: 1 });
+  await writeFile(f.manifest.runnerCli.path, childScript({ requests: 1 }) + "\nassert.equal(await readFile(request.runnerd.path, 'utf8'), 'synthetic daemon');\n");
+  f.manifest.runnerCli.sha256 = sha256(await readFile(f.manifest.runnerCli.path)); await f.save();
+  Object.defineProperty(f.environment, 'OPENAI_API_KEY', { get() {
+    writeFileSync(f.manifest[replaced].path, replaced === 'runnerCli' ? "throw new Error('replacement must not execute');" : 'replaced daemon');
+    return 'synthetic-upstream-private';
+  }});
+  const result = await f.run();
+  assert.equal(result.code, 0); assert.equal(result.report.cleanupVerified, true);
+  assert.equal((await summarizeControlledCampaign(f.manifest)).incompleteAttempts, 0);
+  await assert.rejects(readdir(join(attemptDirectory(f.manifest, 'attempt-0'), 'executables')), { code: 'ENOENT' });
 });

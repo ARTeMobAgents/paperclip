@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { lstat, mkdir, open, readFile, realpath, rename, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -17,7 +17,7 @@ const absent = pid => { try { process.kill(pid, 0); return false; } catch (error
 export const attemptDirectory = (manifest, attemptId) => join(manifest.outputDirectory, sha256(attemptId));
 
 async function runChild(input) {
-  const child = spawn(process.execPath, [input.cli, '--request', input.requestPath, '--output', input.artifactPath, '--gateway-config', input.descriptorPath], {
+  const child = spawn(process.execPath, ['--import', input.loader, input.cli, '--request', input.requestPath, '--output', input.artifactPath, '--gateway-config', input.descriptorPath], {
     cwd: input.cwd, env: input.environment, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stopped = null, force;
@@ -57,8 +57,11 @@ export async function runControlledEval({ manifestPath, requestPath, outputPath,
     const suffix = relative(resolve(request.session.workingDirectory), resolve(manifest.outputDirectory));
     if (!suffix || suffix !== '..' && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix)) throw new Error('Controller evidence must be outside the disposable workspace');
   }
-  for (const artifact of [manifest.runnerCli, manifest.runnerPackage, manifest.runnerd]) {
-    if (sha256(await readFile(artifact.path)) !== artifact.sha256) throw new Error('Controlled eval executable provenance changed');
+  const verified = {};
+  for (const name of ['runnerCli', 'runnerPackage', 'runnerd']) {
+    const artifact = manifest[name], bytes = await readFile(artifact.path);
+    if (sha256(bytes) !== artifact.sha256) throw new Error('Controlled eval executable provenance changed');
+    if (name !== 'runnerPackage') verified[name] = bytes;
   }
   const provider = attempt.provider === 'codex' ? 'openai' : 'anthropic';
   const keyName = manifest.route === 'braintrust' ? 'BRAINTRUST_API_KEY' : provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
@@ -78,8 +81,19 @@ export async function runControlledEval({ manifestPath, requestPath, outputPath,
     maxRequests: attempt.maxRequests, maxConcurrent: attempt.maxConcurrent, maxAttemptsPerExecution: 1 };
   await atomicJson(join(root, 'admission.json'), { schema: 'paperclip.runner-eval.admission/v1', campaignId: manifest.campaignId,
     manifestSha256, attempt, limits, startedAt });
+  const executables = join(root, 'executables');
+  await mkdir(executables, { mode: 0o700 });
+  const stagedCli = join(executables, 'entry.mjs'), stagedRunnerd = join(executables, 'runnerd'), loader = join(executables, 'imports.mjs');
+  await writeFile(stagedCli, verified.runnerCli, { flag: 'wx', mode: 0o400 });
+  await writeFile(stagedRunnerd, verified.runnerd, { flag: 'wx', mode: 0o500 });
+  const stagedUrl = JSON.stringify(pathToFileURL(stagedCli).href), originalUrl = JSON.stringify(pathToFileURL(manifest.runnerCli.path).href);
+  await writeFile(loader, `import { registerHooks } from 'node:module';
+registerHooks({ resolve(specifier, context, nextResolve) {
+  return nextResolve(specifier, context.parentURL === ${stagedUrl} ? { ...context, parentURL: ${originalUrl} } : context);
+} });\n`, { flag: 'wx', mode: 0o400 });
   const retainedRequestPath = join(root, 'request.json');
-  await writeFile(retainedRequestPath, JSON.stringify(request) + '\n', { flag: 'wx', mode: 0o600 });
+  const childRequest = structuredClone(request); childRequest.runnerd.path = stagedRunnerd;
+  await writeFile(retainedRequestPath, JSON.stringify(childRequest) + '\n', { flag: 'wx', mode: 0o600 });
   await mkdir(join(root, 'receipts'), { mode: 0o700 });
   await mkdir(join(root, 'home'), { mode: 0o700 });
   await mkdir(join(root, 'tmp'), { mode: 0o700 });
@@ -105,7 +119,7 @@ export async function runControlledEval({ manifestPath, requestPath, outputPath,
     const artifactPath = join(root, 'provider-artifact.json');
     signal?.throwIfAborted();
     if (Date.now() >= deadlineAt) throw new Error('Controlled attempt deadline reached before spawn');
-    child = await runChild({ cli: manifest.runnerCli.path, requestPath: retainedRequestPath, artifactPath, descriptorPath,
+    child = await runChild({ cli: stagedCli, loader, requestPath: retainedRequestPath, artifactPath, descriptorPath,
       cwd: request.session.workingDirectory ?? root, environment: childEnvironment, deadlineAt, signal, closeGateway: () => gateway.close() });
     for (const stream of ['stdout', 'stderr']) await writeFile(join(root, `${stream}.log`), redact(child[stream]), { flag: 'wx', mode: 0o600 });
     const raw = await readFile(artifactPath, 'utf8');
@@ -129,14 +143,22 @@ export async function runControlledEval({ manifestPath, requestPath, outputPath,
     try { await gateway?.close(); } catch { failure = 'gateway_cleanup_unverified'; }
     try { await ledger.close(); } catch { failure = 'ledger_close_failed'; }
   }
+  if (cleanupVerified) {
+    try { await rm(executables, { recursive: true }); }
+    catch { cleanupVerified = false; failure ??= 'executable_cleanup_unverified'; }
+  }
   const snapshot = ledger.snapshot();
   if (snapshot.overBudget || snapshot.conflictingRequests || snapshot.inflight || snapshot.unknownRequests !== snapshot.boundedUnresolvedRequests) failure ??= 'request_accounting_unbounded';
+  const receiptHashes = {};
+  try {
+    for (const request of snapshot.requests) receiptHashes[request.requestId] = sha256(await readFile(join(root, 'receipts', `${request.requestId}.json`)));
+  } catch { failure ??= 'request_receipt_missing'; }
   const ledgerSha256 = sha256(await readFile(ledgerPath));
   const report = { schema: 'paperclip.runner-eval.control-result/v1', campaignId: manifest.campaignId, manifestSha256,
     executionId: attempt.executionId, attemptId: attempt.attemptId, requestSha256: attempt.requestSha256,
     allocationUsd: attempt.maxUsd, limits, startedAt, finishedAt: new Date().toISOString(), status: failure ? 'incomplete' : 'closed', failure,
     child: child ? { code: child.code, signal: child.signal, stopped: child.stopped } : null,
-    cleanupVerified, secretExcluded, providerArtifactSha256, ledgerSha256, accounting: snapshot };
+    cleanupVerified, secretExcluded, providerArtifactSha256, ledgerSha256, receiptHashes, accounting: snapshot };
   await atomicJson(join(root, 'result.json'), report);
   const resultArtifact = artifact ?? { schema: 'paperclip-runner/eval-session-artifact/v1', attemptId: attempt.attemptId,
     requestedModel: attempt.model, infrastructureError: 'Controlled provider did not retain an artifact' };
