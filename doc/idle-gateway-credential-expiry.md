@@ -26,7 +26,9 @@ reconstructs existing rows but does not provide continuous replica discovery.
 
 ## Worker contract
 
-`nextCredentialExpiryAt` reads the earliest non-null expiry across both tables.
+`nextCredentialExpiryAt` reads one earliest non-null expiry from each table using
+expiry-first indexes, then compares those at most two values. The migration adds
+the session expiry index; the token expiry index already exists.
 An empty credential store or retained non-expiring tokens returns no deadline.
 `registerGatewayCredentialExpiryWork` supplies cleanup and deadline selection to
 the shared `registerDeadlineWork` helper. Provider and authentication behavior
@@ -46,6 +48,12 @@ resume completes overdue cleanup. The coordinator owns shutdown and waits for
 in-flight work.
 
 ## Evidence and limits
+
+The concurrent session index runs through the migration executor's existing
+per-file top-level path. Initial application and repeat application were tested.
+A PostgreSQL plan with 20,000 sessions and 20,000 tokens, including 19,000
+non-expiring tokens, used both expiry indexes and read one row from each.
+This establishes bounded lookup on that fixture, not production latency.
 
 The new PostgreSQL suite exercises real session/token creation, configured idle
 state, non-expiring history, expiry ordering, revoked-token cleanup, outer commit
