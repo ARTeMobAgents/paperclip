@@ -5,6 +5,7 @@ export async function notifyToolReviewChange(transaction: object) {
   await notifyDeliveryWork(transaction, DELIVERY_QUEUES.toolReviewExpiry);
   await notifyDeliveryWork(transaction, DELIVERY_QUEUES.toolReviewRecovery);
   await notifyDeliveryWork(transaction, DELIVERY_QUEUES.toolReviewInterruption);
+  await notifyDeliveryWork(transaction, DELIVERY_QUEUES.toolReviewProjection);
 }
 
 export function writeToolReviewChange<T>(db: Db, write: (transaction: Db) => Promise<T>): Promise<T> {

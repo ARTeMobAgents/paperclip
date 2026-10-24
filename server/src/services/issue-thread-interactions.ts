@@ -2240,6 +2240,7 @@ export function issueThreadInteractionService(
             })
           : undefined;
 
+      if (lockedCurrent.kind === "request_confirmation") await notifyDeliveryWork(tx, DELIVERY_QUEUES.toolReviewProjection);
       const [updated] = await tx
         .update(issueThreadInteractions)
         .set({
@@ -2517,6 +2518,7 @@ export function issueThreadInteractionService(
         now,
       });
 
+      if (lockedCurrent.kind === "request_confirmation") await notifyDeliveryWork(tx, DELIVERY_QUEUES.toolReviewProjection);
       const [resolved] = await tx
         .update(issueThreadInteractions)
         .set({
@@ -3246,6 +3248,7 @@ export function issueThreadInteractionService(
       const cancelled: IssueThreadInteraction[] = [];
       for (const row of rows) {
         const updated = await db.transaction(async (tx) => {
+          if (row.kind === "request_confirmation") await notifyDeliveryWork(tx, DELIVERY_QUEUES.toolReviewProjection);
           const [resolved] = await tx
             .update(issueThreadInteractions)
             .set({
@@ -3330,6 +3333,7 @@ export function issueThreadInteractionService(
       const expired: IssueThreadInteraction[] = [];
       for (const { row, replacementInteractionId } of supersededRows) {
         const updated = await db.transaction(async (tx) => {
+          if (row.kind === "request_confirmation") await notifyDeliveryWork(tx, DELIVERY_QUEUES.toolReviewProjection);
           const [updatedRow] = await tx
             .update(issueThreadInteractions)
             .set({
@@ -3749,6 +3753,7 @@ export function issueThreadInteractionService(
             data.kind === "ask_user_questions"
               ? buildSupersededByNewerInteractionResult(row.id)
               : buildSupersededByNewerRequestResult(row.id);
+          if (data.kind === "request_confirmation") await notifyDeliveryWork(tx, DELIVERY_QUEUES.toolReviewProjection);
           const supersededRows = await tx
             .update(issueThreadInteractions)
             .set({
@@ -4400,6 +4405,7 @@ export function issueThreadInteractionService(
               .delete(toolOauthStates)
               .where(eq(toolOauthStates.interactionId, row.id));
           }
+          if (row.kind === "request_confirmation") await notifyDeliveryWork(tx, DELIVERY_QUEUES.toolReviewProjection);
           const [resolved] = await tx
             .update(issueThreadInteractions)
             .set({
@@ -4568,6 +4574,7 @@ export function issueThreadInteractionService(
           );
           if (!sampleConfirmationRow) continue;
           const updatedInteractions = await db.transaction(async (tx) => {
+            await notifyDeliveryWork(tx, DELIVERY_QUEUES.toolReviewProjection);
             const updatedRows = await tx
               .update(issueThreadInteractions)
               .set({

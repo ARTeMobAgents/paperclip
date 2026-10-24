@@ -1,3 +1,4 @@
+import { registerToolReviewProjectionWork } from "./services/tool-review-projection-work.js";
 import { registerToolReviewInterruptionWork } from "./services/tool-review-interruption-work.js";
 import { registerToolReviewRecoveryWork } from "./services/tool-review-recovery-work.js";
 import { registerToolReviewExpiryWork } from "./services/tool-review-expiry-work.js";
@@ -1458,7 +1459,10 @@ async function startServerWithDatabaseTeardown(
     } else {
       await app.locals.toolGateway.settleInterruptedActionReviews();
     }
-    return app.locals.toolGateway.sweepActionReviews({ includeExpiry: false, includeApproved: false, includeInterrupted: false });
+    return config.heartbeatSchedulerEnabled
+      ? registerToolReviewProjectionWork(deliveryWork, { sweep: app.locals.toolGateway.repairActionReviewProjections },
+        () => !isIdleTaskDrainActive() && !heartbeatSchedulerStopped && !isWarmStandby()).ready
+      : app.locals.toolGateway.repairActionReviewProjections();
   }).catch((err: unknown) => logger.error({ err }, "startup tool review recovery failed"));
   await timeStartupRecovery("gateway_sessions", () => config.heartbeatSchedulerEnabled
     ? registerGatewayCredentialExpiryWork(deliveryWork, app.locals.toolGateway,
@@ -1882,8 +1886,6 @@ async function startServerWithDatabaseTeardown(
           .catch((err) => {
             logger.error({ err }, "periodic tool connection health sweep failed");
           }));
-
-        trackHeartbeatSchedulerWork(app.locals.toolGateway.sweepActionReviews({ includeExpiry: false, includeApproved: false, includeInterrupted: false }).catch((err: unknown) => logger.error({ err }, "tool review recovery failed")));
 
         if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
         if (!(await heartbeat.resolveSchedulingSuppression()).suppressed) {

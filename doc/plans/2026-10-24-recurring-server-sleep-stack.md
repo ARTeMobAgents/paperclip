@@ -18,7 +18,7 @@ Do not mark an item done from a timer removal or a green check alone.
 | 04 | Decision retention and notifications | Retention deadlines and notification delivery are separate reasons | Pending |
 | 05 | Decision expiry and interrupted effects | Expiry, effect recovery, continuation recovery | Pending |
 | 06 | Tool connection health | Configuration/use activation and defined proactive health deadlines | Pending |
-| 07 | Secret proposals, tool reviews, gateway tokens | Separate expiry/scrub/recovery owners | Secret proposals: [#17446](https://github.com/paperclipai/paperclip/pull/17446), checks passed at `d41590ac0e`; gateway credentials: [#17450](https://github.com/paperclipai/paperclip/pull/17450), all checks passed, Greptile 5/5 at `c5c53fc43f`; pending tool-review expiry: [#17453](https://github.com/paperclipai/paperclip/pull/17453), all checks passed, Greptile 5/5 at `ce6a260a83`; approved recovery: [#17454](https://github.com/paperclipai/paperclip/pull/17454), Greptile 5/5 at `7a1cf03e62`, CI running; interrupted claims: [#17458](https://github.com/paperclipai/paperclip/pull/17458), local checks passed, fresh CI/review running; projection pending |
+| 07 | Secret proposals, tool reviews, gateway tokens | Separate expiry/scrub/recovery owners | Secret proposals: [#17446](https://github.com/paperclipai/paperclip/pull/17446), checks passed at `d41590ac0e`; gateway credentials: [#17450](https://github.com/paperclipai/paperclip/pull/17450), all checks passed, Greptile 5/5 at `c5c53fc43f`; pending tool-review expiry: [#17453](https://github.com/paperclipai/paperclip/pull/17453), all checks passed, Greptile 5/5 at `ce6a260a83`; approved recovery: [#17454](https://github.com/paperclipai/paperclip/pull/17454), all checks passed, Greptile 5/5 at `7a1cf03e62`; interrupted claims: [#17458](https://github.com/paperclipai/paperclip/pull/17458), all checks passed, Greptile 5/5 at `85003a7ac4`; projection implemented, PR pending |
 | 08 | GitHub connection events and continuity | Event discovery/replay and credential continuity separately | Pending |
 | 09 | Merged-PR confirmations | Candidate writes, webhook activation where supported, outstanding-candidate fallback | Pending |
 | 10 | External-object refresh | Configuration changes, refresh deadlines, source events | Pending |
@@ -255,3 +255,32 @@ attached to this chat. Slice 05 has fresh Greptile 5/5 at `7a1cf03e62`; CI is
 running with no failure in the latest snapshot. The next branch is
 `codex/sleep-07-tool-review-projection`, based on #17458. No seventh implementation
 or readiness is claimed yet. The full remaining inventory stays in scope.
+
+
+## Slice 07: tool-review interaction projection
+
+The implementation removes the last combined review sweep from the main tick.
+It pages terminal mismatches and retains retries only for actual debt or failures.
+Gateway reflection keeps locks, current-state checks, activity, and continuation
+ownership; concurrent identical repairs do not write twice. The producer audit
+also covers administrative card result replacements, before the mutation in the
+existing transaction. See [projection repair](../idle-tool-review-projection.md).
+
+Twelve new lifecycle cases are included in 148 passing service/startup tests.
+Gateway acceptance passes all 92 tests and workspace typechecking passes. The
+initial missing-state bug and referenced-key fixture failure are recorded in the
+behavior document. Build and additional consumer regressions are running; no
+seventh PR is claimed ready yet.
+
+Fresh parent evidence: #17454 at `7a1cf03e62` and #17458 at `85003a7ac4` have
+passing CI test/build matrices and Greptile 5/5 with no unresolved findings.
+Their additional Paperclip Review checks are still queued/running. The first
+six PRs remain open; the full inventory is still in scope. Master inspected
+at `410e5c6eed` retains these recurring duties and has no migration-number
+collision (its latest journal entry is 0377).
+
+Slice 07 final local verification: 815 selected tests pass, workspace typecheck
+and build pass. One initial interaction cleanup-hook timeout is recorded in
+the behavior document; the complete isolated suite then passed. Both parent
+PRs #17454 and #17458 now have every check passed and are mergeable, including
+the additional Paperclip Review checks. Full CI/review for slice 07 is next.

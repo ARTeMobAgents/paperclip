@@ -1,3 +1,4 @@
+import { toolReviewProjectionService } from "./tool-review-projection.js";
 import { toolReviewInterruptionService } from "./tool-review-interruption.js";
 import { claimToolTestApproval, persistToolTestOutcome, startToolTestInvocation, type ToolTestApprovalClaim } from "./tool-test-approval.js";
 import { recoverApprovedToolReviews } from "./tool-review-recovery.js";
@@ -2326,6 +2327,11 @@ export function createToolGatewayService(
                 ? "stale_target"
                 : null;
       if (!outcome) return;
+      const projection = asRecord(currentResult?.toolAction);
+      if (projection?.status === (input.status === "cancelled" ? "expired" : input.status)
+        && projection.errorCode === (input.errorCode ?? null)
+        && projection.errorMessage === (input.errorMessage ?? null)
+        && projection.resultSummary === (input.resultSummary ?? null)) return false;
 
       const now = new Date();
       await tx
@@ -7916,10 +7922,10 @@ export function createToolGatewayService(
       return { projectId: issue.projectId };
     }
     const expiredAt = new Date();
-    await db
+    await writeToolReviewChange(db, tx => tx
       .update(toolActionRequests)
       .set({ status: "expired", resolvedAt: expiredAt, updatedAt: expiredAt })
-      .where(eq(toolActionRequests.id, claimed.id));
+      .where(eq(toolActionRequests.id, claimed.id)));
     await reflectToolActionInteractionLifecycle({
       actionRequestId: claimed.id,
       status: "expired",
@@ -8626,6 +8632,7 @@ export function createToolGatewayService(
     };
   }
 
+  const reviewProjection = toolReviewProjectionService(db, reflectToolActionInteractionLifecycle);
   const reviewInterruption = toolReviewInterruptionService(db, async settled => {
     void emitConnectionInvoked(db, settled.invocationId);
     await reflectToolActionInteractionLifecycle(settled);
@@ -9649,6 +9656,7 @@ export function createToolGatewayService(
       return buildTestCallStatus(actionRequest, invocation);
     },
 
+    repairActionReviewProjections: reviewProjection.sweep,
     settleInterruptedActionReviews: reviewInterruption.sweep,
     nextActionReviewInterruptionAt: reviewInterruption.next,
     sweepExpiredActionReviews: reviewExpiry.sweep,
@@ -9679,40 +9687,7 @@ export function createToolGatewayService(
     },
 
     async sweepActionReviews(input: { includeExpiry?: boolean; includeApproved?: boolean; includeInterrupted?: boolean } = {}) {
-      // A process may stop between persisting a provider outcome and updating the
-      // feed projection. Reconcile from authoritative rows before delivering it.
-      const unreflected = await db
-        .select({ request: toolActionRequests, invocation: toolInvocations })
-        .from(toolActionRequests)
-        .innerJoin(
-          issueThreadInteractions,
-          eq(issueThreadInteractions.id, toolActionRequests.interactionId),
-        )
-        .innerJoin(
-          toolInvocations,
-          eq(toolInvocations.id, toolActionRequests.invocationId),
-        )
-        .where(
-          and(
-            inArray(toolActionRequests.status, [
-              "executed",
-              "failed",
-              "expired",
-              "cancelled",
-            ]),
-            sql`coalesce(${issueThreadInteractions.result}->'toolAction'->>'status', '') <> case when ${toolActionRequests.status} = 'cancelled' then 'expired' else ${toolActionRequests.status} end`,
-          ),
-        )
-        .limit(100);
-      for (const { request, invocation } of unreflected)
-        await reflectToolActionInteractionLifecycle({
-          actionRequestId: request.id,
-          status: request.status as
-            "executed" | "failed" | "expired" | "cancelled",
-          errorCode: invocation.errorCode,
-          errorMessage: invocation.errorMessage,
-          resultSummary: invocation.resultSummary?.summary,
-        });
+      await reviewProjection.sweep();
       let scanned = input.includeExpiry === false ? 0 : (await reviewExpiry.sweep()).scanned;
       if (input.includeApproved !== false) scanned += (await this.recoverApprovedActionReviews()).scanned;
       if (input.includeInterrupted !== false) scanned += (await reviewInterruption.sweep()).scanned;
