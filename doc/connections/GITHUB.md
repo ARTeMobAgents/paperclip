@@ -84,11 +84,14 @@ and webhook binding uses the same order:
 2. The active personal GitHub grant owned by the run's `responsibleUserId`.
 3. For automated work without a responsible user, a personal grant only when
    an existing standing delegation names the agent.
-4. Legacy `GH_TOKEN`/`GITHUB_TOKEN` only when no managed GitHub connection is
+4. An active default organization grant on a GitHub connection installed for
+   the agent or company, when no active personal grant or delegation applies.
+5. Legacy `GH_TOKEN`/`GITHUB_TOKEN` only when no managed GitHub connection is
    configured for the company.
 
 An unavailable or ambiguous managed identity fails visibly. It never falls
-through to another person, an organization credential, or a legacy token.
+through to another person or a legacy token. An explicit dedicated grant still
+overrides this order, even when that grant is unavailable.
 Agent grants are company-scoped, have exactly one `subjectAgentId`, cannot be
 organization defaults, and are installed only for that agent.
 

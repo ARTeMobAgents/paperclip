@@ -594,6 +594,45 @@ const support = await getEmbeddedPostgresTestSupport();
         env: {},
       });
     });
+    it("uses an installed default organization grant when the responsible user's grant is revoked", async () => {
+      const input = await seed();
+      const personal = await grant(input, "A");
+      const shared = await grant(input, "robot", true);
+      await db.update(connectionGrants).set({
+        kind: "organization",
+        subjectAgentId: null,
+        isDefault: true,
+      }).where(eq(connectionGrants.id, shared.id));
+      await db.update(toolConnections).set({ credentialPolicy: "shared" })
+        .where(eq(toolConnections.id, shared.connectionId));
+      await db.update(toolConnectionInstalls).set({
+        targetType: "company",
+        targetId: input.companyId,
+      }).where(eq(toolConnectionInstalls.connectionId, shared.connectionId));
+
+      // An active responsible-user grant still takes precedence over sharing.
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: "available", source: "personal", login: "A",
+      });
+      await db.update(connectionGrants).set({ status: "revoked" })
+        .where(eq(connectionGrants.id, personal.id));
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: "available", source: "organization", login: "robot",
+      });
+      expect((await resolveManagedGitHubIdentitySelection(db, input.companyId, input)).grant?.id).toBe(shared.id);
+
+      // Revoking or removing the shared default must not resurrect the personal grant.
+      await db.update(connectionGrants).set({ isDefault: false })
+        .where(eq(connectionGrants.id, shared.id));
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: "unavailable", env: {},
+      });
+      await db.update(connectionGrants).set({ isDefault: true, status: "revoked" })
+        .where(eq(connectionGrants.id, shared.id));
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: "unavailable", env: {},
+      });
+    });
     it("does not resolve the company default person's GitHub", async () => {
       const input = await seed();
       await grant(input, "A");

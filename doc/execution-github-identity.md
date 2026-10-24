@@ -39,7 +39,7 @@ Read-only access must use separately authorized tools that enforce that boundary
 
 Server-side Git operations and GitHub gateway calls follow the same selection rules. Approved gateway operations retain their signed originating identity. Connection audience and tool policies continue to apply to the selected person's connection. Native catalogs remain stable across identity changes, but each invocation resolves the selected grant again. Personal OAuth secret declarations survive connection pauses and metadata edits.
 
-Managed commands disable ambient Git credential helpers, Git global/system configuration, host GitHub CLI configuration, and host SSH identity access. Per-operation GitHub CLI configuration is isolated in a writable configuration directory beneath the managed launcher directory. Missing credentials clear previous author and token values; no teammate, standing delegation, host token, or company-default user's account is substituted. Anonymous/local operations remain available where supported.
+Managed commands disable ambient Git credential helpers, Git global/system configuration, host GitHub CLI configuration, and host SSH identity access. Per-operation GitHub CLI configuration is isolated in a writable configuration directory beneath the managed launcher directory. Missing credentials clear previous author and token values; no teammate, host token, or company-default user's account is substituted. An active default organization grant on an installed connection can supply the company identity when no active personal or delegated grant applies. Anonymous/local operations remain available where supported.
 
 OpenCode retains the controller-projected GitHub broker environment through
 runner startup and provider startup. Shell operations acquire credentials for
@@ -74,7 +74,7 @@ settles all started uploads before startup rejects; later files and the final
 permission step do not start. This changes startup scheduling, not credentials
 or callback transport selection.
 
-Scripts that previously read a persistent `GH_TOKEN` must use managed `git`, `gh`, or GitHub gateway tools. Managed execution skips legacy GitHub token bindings in agent, environment, project, and routine configuration before secret preflight. Configure personal or dedicated access through the GitHub connection instead. Directly invoking an unmanaged executable or retaining a token obtained during an earlier invocation is outside the managed invocation contract.
+Scripts that previously read a persistent `GH_TOKEN` must use managed `git`, `gh`, or GitHub gateway tools. Managed execution skips legacy GitHub token bindings in agent, environment, project, and routine configuration before secret preflight. Configure personal, dedicated, or shared organization access through the GitHub connection instead. Directly invoking an unmanaged executable or retaining a token obtained during an earlier invocation is outside the managed invocation contract.
 
 ## Legacy hosts and networking
 
@@ -130,7 +130,7 @@ accounts or unidentifiable duplicate grants remain ambiguous. Managed commands
 print the redacted reason when GitHub access is unavailable, while unrelated
 local operations can still proceed without credentials.
 
-Run details show identity revisions and redacted GitHub results: responsible person, selected login when available, personal/dedicated source, and an unavailable reason. Tasks do not receive an additional identity indicator or takeover action.
+Run details show identity revisions and redacted GitHub results: responsible person, selected login when available, personal/dedicated/organization source, and an unavailable reason. Tasks do not receive an additional identity indicator or takeover action.
 
 ## Deployment and verification
 
