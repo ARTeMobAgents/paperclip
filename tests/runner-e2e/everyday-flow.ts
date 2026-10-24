@@ -21,6 +21,7 @@ import { waitForTaskChatRendered, waitForTaskIdentity } from "./continuation-scr
 import { hasPersistedSource, isSavedSourceCheckpoint } from "./everyday-interruption.js";
 import { collectRunEvents } from "./run-observations.js";
 import { gradeRemoteRestart, observeRemoteRestartBoundary, projectRemoteRestartEvents, projectRemoteRestartRun, waitForRemoteRestartBoundary, type RemoteRestartEvidence } from "./everyday-remote-restart.js";
+import type { ControllerOutageReceipt } from "./controller-outage.js";
 import { setupAggregatorFixture } from "./aggregator-fixture.js";
 import { gradeProviderChoice, gradeProviderOutcome, requireProviderAccessCard } from "./connection-routing-evidence.js";
 import { setupConnectionReview } from "./connection-reviews.js";
@@ -89,7 +90,7 @@ interface Input {
   workspacePath: string;
   privateDir: string;
   deadlineAt: number;
-  restart(): Promise<void>;
+  restart(): Promise<ControllerOutageReceipt | void>;
   observe(issue: StoryIssue, runs: StoryRun[]): void;
   capture(id: string, label: string, file: string): Promise<void>;
   evidence(name: string, value: unknown): Promise<void>;
@@ -595,6 +596,9 @@ export async function runEverydayFlow(input: Input) {
       "everyday-delivery.ts",
       "everyday-observations.ts",
       "everyday-remote-restart.ts",
+      "controller-outage.ts",
+      "server.ts",
+      "server-stop.ts",
       "native-event-envelope.ts",
       "run-observations.ts",
       "everyday-artifact.py",
@@ -949,7 +953,8 @@ export async function runEverydayFlow(input: Input) {
           ev.remoteRestart = { before };
           await input.evidence("remote-restart-before.json", before);
         } else ev.allowedInterruptedRuns.push(active.id);
-        await input.restart();
+        const outage = await input.restart();
+        if (requireRemoteRestart) ev.remoteRestart!.outage = outage || undefined;
         note("controller-restarted");
         await openParent();
         if (requireRemoteRestart) {

@@ -3,6 +3,7 @@ import { canonicalJson } from "../../packages/shared/src/portability-hash.js";
 import { isValidNativePrpEnvelope } from "./native-event-envelope.js";
 import type { StoryCheck, StoryRun } from "./everyday-observations.js";
 import { pollUntil } from "./api.js";
+import { validControllerOutageReceipt, type ControllerOutageReceipt } from "./controller-outage.js";
 
 type Row = Record<string, unknown>;
 const record = (value: unknown): Row => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Row : {};
@@ -21,6 +22,7 @@ export interface RemoteRestartBoundary {
   events: RemoteRestartEvent[];
 }
 export interface RemoteRestartEvidence {
+  outage?: ControllerOutageReceipt;
   before?: RemoteRestartBoundary;
   after?: RemoteRestartBoundary;
   final?: { run: StoryRun; events: RemoteRestartEvent[]; operations: Row[];
@@ -151,5 +153,6 @@ export function gradeRemoteRestart(evidence: RemoteRestartEvidence | undefined):
     check("remote-restart-same-process-and-lease", sameIdentity, "The same run, native session, Runner process and sandbox lease remain live after restart."),
     check("remote-restart-native-completion-once", nativeCompletion, "The original provider turn completes once and retains its native receipt prefix."),
     check("remote-restart-files-finalized", Boolean(saved), "The original run commits its workspace receipt and leaves no active operation or recovery."),
+    check("remote-restart-fault-exercised", validControllerOutageReceipt(evidence?.outage), "The main server exited, its cache was retired, and a distinct replacement became ready after the requested outage."),
   ];
 }

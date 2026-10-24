@@ -1,5 +1,42 @@
 # Everyday Paperclip workflow evals
 
+## Main-server outage qualification
+
+The remote Codex `recover-controller` cell now defaults to SIGKILL, an observed
+one-second offline interval and retirement of the old controller cache. It uses
+natural ownership timing. The wrapper emits `controller-outage.json`; the grader
+requires distinct server processes, confirmed HTTP loss, cache retirement and the
+requested interval, in addition to same-run/provider-turn and finalization proof.
+Partial fault receipts remain in the attempt's private `control/` directory on
+failure. A successful task without the fault receipt cannot qualify.
+
+Use `PAPERCLIP_RUNNER_E2E_CONTROLLER_STOP_SIGNAL=SIGTERM` for graceful shutdown or
+`PAPERCLIP_RUNNER_E2E_CONTROLLER_OUTAGE_MS=300000` for the five-minute contract.
+Both settings are recorded; compare only matching configurations. The configured
+duration is a minimum hold after confirmed HTTP loss. Shutdown and startup add
+to total recovery time; they do not extend the runner's seven-minute grace or the
+workflow's attempt deadline. `recover-controller` permits no automatic retries.
+
+```sh
+PAPERCLIP_RUNNER_E2E_CONTROLLER_OUTAGE_MS=300000 pnpm test:e2e:runner -- --id everyday-workflows.runner-codex.daytona.recover-controller --max-automatic-retries 0
+```
+
+The credential-free wrapper smoke starts the actual main server and a separate
+disposable Postgres, kills/replaces the server, checks that Postgres never
+restarted, reads existing data, accepts a new HTTP mutation, and confirms cleanup:
+
+```sh
+node cli/node_modules/tsx/dist/cli.mjs tests/runner-e2e/controller-replacement-smoke.ts
+```
+
+It prints a private JSON evidence path. It uses no model and **does not qualify
+active-agent continuity, queued launches, or an A-to-B version upgrade**. See the
+[qualification plan](../../doc/plans/2026-10-22-hot-upgrade-qualification.md) for the
+separate gates and outstanding work. Hosted qualification still requires a valid
+pinned Daytona image and the existing credential/budget admission.
+
+## Workflow suite
+
 This manual suite tests useful work through the production browser, public API,
 native runner, and normal agent instructions. It complements the tightly
 scripted runner contract fixtures. It does not add a scheduled or default paid
@@ -51,6 +88,12 @@ The native Codex Daytona restart cell now requires a completed native tool
 receipt while that revision is still running. Before and after restart it pins
 the same run, normalized session, Runner identity, PID/start time, and active
 sandbox lease. The original receipt prefix must remain unchanged. A run that
+uses this native Codex remote cell also loses the old controller runtime cache
+between stopping and starting the server. The harness moves it into private
+evidence outside product lookup paths and requires an acknowledgement of that
+fault. Postgres and the instance encryption key survive. This checks deployment
+recovery without relying on the old controller journal or local warm-session cache.
+A run that
 ends before either active observation leaves the fault boundary unexercised;
 it cannot pass from the final ZIP alone. The cell no longer exempts an original
 Codex remote run that fails with `process_lost` and is replaced.

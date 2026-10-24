@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ControllerOutageReceipt } from "./controller-outage.js";
 import { storyLifecycleChecks, type StoryRun } from "./everyday-observations.js";
 import { gradeRemoteRestart, observeRemoteRestartBoundary, projectRemoteRestartEvents, projectRemoteRestartRun, waitForRemoteRestartBoundary } from "./everyday-remote-restart.js";
 
@@ -34,7 +35,11 @@ function fixture() {
   const final = { run: finished, events: projectRemoteRestartEvents(finished, finalRows),
     operations: [{ companyId: "company", heartbeatRunId: "run", issueId: "task", executionWorkspaceId: "workspace",
       phase: "workspace_finalize", status: "succeeded" }], scheduledRetry: null as unknown, recoveryActions: [] as Record<string, unknown>[] };
-  return { active, scope, leases, event, rows, afterRows, finalRows, evidence: { before, after, final } };
+  const outage: ControllerOutageReceipt = { schema: "paperclip.e2e.controller-outage/v1", requestId: "story-test",
+    signal: "SIGKILL", holdMs: 1000, previousPid: 100, replacementPid: 200,
+    startedAt: "2026-10-22T00:00:00.000Z", stoppedAfterMs: 100, cacheDiscarded: true,
+    replacementStartedAfterMs: 1100, readyAfterMs: 4000 };
+  return { active, scope, leases, event, rows, afterRows, finalRows, evidence: { before, after, final, outage } };
 }
 
 describe("remote restart boundary polling", () => {
@@ -66,6 +71,13 @@ describe("remote restart boundary polling", () => {
 });
 
 describe("remote restart lifecycle evidence", () => {
+  it("rejects otherwise successful recovery without a complete actual-server fault receipt", () => {
+    const { evidence } = fixture();
+    for (const outage of [undefined, { ...evidence.outage, replacementPid: 100 },
+      { ...evidence.outage, replacementStartedAfterMs: 1099 }, { ...evidence.outage, cacheDiscarded: false }]) {
+      expect(gradeRemoteRestart({ ...evidence, outage }).every(check => check.passed)).toBe(false);
+    }
+  });
   it("does not accept a successful replacement as proof that the original remote runner recovered", () => {
     const { evidence } = fixture();
     const replacement = { ...evidence.final.run, id: "replacement", runnerInstanceId: "replacement-runner" };
