@@ -18,7 +18,7 @@ Do not mark an item done from a timer removal or a green check alone.
 | 04 | Decision retention and notifications | Retention deadlines and notification delivery are separate reasons | Pending |
 | 05 | Decision expiry and interrupted effects | Expiry, effect recovery, continuation recovery | Pending |
 | 06 | Tool connection health | Configuration/use activation and defined proactive health deadlines | Pending |
-| 07 | Secret proposals, tool reviews, gateway tokens | Separate expiry/scrub/recovery owners | Secret proposals: [#17446](https://github.com/paperclipai/paperclip/pull/17446), checks passed at `d41590ac0e`; gateway credentials: [#17450](https://github.com/paperclipai/paperclip/pull/17450), all checks passed, Greptile 5/5 at `c5c53fc43f`; pending tool-review expiry: [#17453](https://github.com/paperclipai/paperclip/pull/17453), all checks passed, Greptile 5/5 at `ce6a260a83`; approved recovery: [#17454](https://github.com/paperclipai/paperclip/pull/17454), review repair pushed; other review duties pending |
+| 07 | Secret proposals, tool reviews, gateway tokens | Separate expiry/scrub/recovery owners | Secret proposals: [#17446](https://github.com/paperclipai/paperclip/pull/17446), checks passed at `d41590ac0e`; gateway credentials: [#17450](https://github.com/paperclipai/paperclip/pull/17450), all checks passed, Greptile 5/5 at `c5c53fc43f`; pending tool-review expiry: [#17453](https://github.com/paperclipai/paperclip/pull/17453), all checks passed, Greptile 5/5 at `ce6a260a83`; approved recovery: [#17454](https://github.com/paperclipai/paperclip/pull/17454), Greptile 5/5 at `7a1cf03e62`, CI running; interrupted claims: [#17458](https://github.com/paperclipai/paperclip/pull/17458), local checks passed, fresh CI/review running; projection pending |
 | 08 | GitHub connection events and continuity | Event discovery/replay and credential continuity separately | Pending |
 | 09 | Merged-PR confirmations | Candidate writes, webhook activation where supported, outstanding-candidate fallback | Pending |
 | 10 | External-object refresh | Configuration changes, refresh deadlines, source events | Pending |
@@ -248,3 +248,10 @@ initial concurrent-run timeout is retained above as evidence, not hidden.
 Workspace typecheck/build and migration safety/numbering pass. The first four
 PRs are mergeable and have all checks passed at their recorded heads. #17454
 is mergeable with fresh checks and review in progress at `7a1cf03e62`.
+
+Slice 06 is [#17458](https://github.com/paperclipai/paperclip/pull/17458), head
+`85003a7ac4`, based on #17454. Greptile review was requested and the PR is
+attached to this chat. Slice 05 has fresh Greptile 5/5 at `7a1cf03e62`; CI is
+running with no failure in the latest snapshot. The next branch is
+`codex/sleep-07-tool-review-projection`, based on #17458. No seventh implementation
+or readiness is claimed yet. The full remaining inventory stays in scope.
