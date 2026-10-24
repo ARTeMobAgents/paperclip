@@ -198,3 +198,53 @@ tool-access service tests pass after enabling the existing external database
 path independently of embedded support. Its initial browser shard failed during
 unrelated plan-task fixture company deletion with a concurrent activity-log FK
 violation. Inspect fresh-head CI before deciding whether that needs a repair.
+
+
+## Slice 06: interrupted tool executions
+
+Branch `codex/sleep-06-interrupted-tool-recovery` is based on #17454 and includes
+its one-shot outcome-write repair. The next deadline is the minimum executing
+claim timestamp plus the existing ten minutes. The new service locks invocation
+then request, rechecks claim identity, preserves saved terminal outcomes, and
+atomically quarantines unknown outcomes without calling a provider. All claim
+producers and request settlements use the existing review notification boundary.
+A partial index supports the first deadline. The aggregate tick now excludes
+interrupted claims; projection repair remains its own pending slice.
+
+Thirteen new worker cases and the existing service/startup selection pass
+(136 total on the combined head). Workspace typecheck/build and migration checks
+pass. Two fake-clock fixture ordering failures were corrected to wait for real
+settlement while advancing retry time. The combined tool-access run had one
+unchanged connection-archive timeout; it passed in isolation. The full suite
+and gateway acceptance are running separately before readiness is claimed.
+No PR is claimed ready until fresh CI and review pass.
+
+## Next owner audit: tool-review interaction projection
+
+The remaining aggregate tool-review duty selects terminal requests whose
+interaction result does not match the authoritative request state. Recovery
+currently reads up to 100 joined rows. Move this duty to its own transaction-
+notified worker, with retries only while projection debt remains. Do not add
+an outbox table merely to migrate the scan.
+
+Audit the final two direct request writers in the gateway as well as existing
+review helpers, expiry, interruption, and Test-tab outcome settlement. Preserve
+the existing reflection owner: it locks issue/interaction/request, checks the
+current request state before writing the card, then publishes activity and
+requests continuation. A no-op reflection can mean an ownership or lifecycle
+condition, not successful reconciliation. Retained terminal requests with
+already matching cards must be quiet. Unprojectable/mismatched durable state
+must not be silently dropped. Paginate without starving later candidates.
+
+Continuation delivery already has its own coordinator. A projection write is
+not proof that downstream delivery or activity publication completed. Identify
+the exact existing recovery owner before removing any backstop, and keep
+provider/private payload interpretation out of the scheduler.
+
+Final slice-06 local verification: the isolated tool-access rerun passes all
+469 tests, gateway acceptance passes 92, and the combined service/startup
+selection passed 136. All 697 selected tests pass on the combined head. The
+initial concurrent-run timeout is retained above as evidence, not hidden.
+Workspace typecheck/build and migration safety/numbering pass. The first four
+PRs are mergeable and have all checks passed at their recorded heads. #17454
+is mergeable with fresh checks and review in progress at `7a1cf03e62`.
