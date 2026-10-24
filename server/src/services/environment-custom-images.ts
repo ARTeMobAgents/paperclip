@@ -291,8 +291,6 @@ export function environmentCustomImageService(
   const environments = environmentService(db);
   const secrets = secretService(db);
 
-  // This service owns all setup-session state and expiry changes. Keep wakes
-  // inside the existing outer transaction, including historical cleanup hints.
   function writeSetup<T>(write: (tx: Db) => PromiseLike<T>): Promise<T> {
     return db.transaction(async tx => {
       await notifyDeliveryWork(tx, DELIVERY_QUEUES.customImageExpiry);

@@ -3,7 +3,6 @@ import type { createDeliveryWorkCoordinator } from "./delivery-work-coordinator.
 import { DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import type { environmentCustomImageService } from "./environment-custom-images.js";
 
-/** Existing setup rows own expiry; provider operations remain in their service. */
 export function registerCustomImageCleanupWork(
   coordinator: ReturnType<typeof createDeliveryWorkCoordinator>,
   service: Pick<ReturnType<typeof environmentCustomImageService>, "cleanupExpiredSetupSessions" | "nextSetupCleanupAt">,
