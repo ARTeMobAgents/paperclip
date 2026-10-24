@@ -18,7 +18,7 @@ Do not mark an item done from a timer removal or a green check alone.
 | 04 | Decision retention and notifications | Retention deadlines and notification delivery are separate reasons | Pending |
 | 05 | Decision expiry and interrupted effects | Expiry, effect recovery, continuation recovery | Pending |
 | 06 | Tool connection health | Configuration/use activation and defined proactive health deadlines | Pending |
-| 07 | Secret proposals, tool reviews, gateway tokens | Separate expiry/scrub/recovery owners | Secret proposals: [#17446](https://github.com/paperclipai/paperclip/pull/17446), CI/review running; gateway credentials: [#17450](https://github.com/paperclipai/paperclip/pull/17450), CI/review running; tool review duties pending |
+| 07 | Secret proposals, tool reviews, gateway tokens | Separate expiry/scrub/recovery owners | Secret proposals: [#17446](https://github.com/paperclipai/paperclip/pull/17446), checks passed at `d41590ac0e`; gateway credentials: [#17450](https://github.com/paperclipai/paperclip/pull/17450), Greptile 5/5 at `c5c53fc43f`, fresh CI running; pending tool-review expiry implemented on slice 04; other review duties pending |
 | 08 | GitHub connection events and continuity | Event discovery/replay and credential continuity separately | Pending |
 | 09 | Merged-PR confirmations | Candidate writes, webhook activation where supported, outstanding-candidate fallback | Pending |
 | 10 | External-object refresh | Configuration changes, refresh deadlines, source events | Pending |
@@ -74,8 +74,8 @@ Inspected after gateway credential slice `75332b9641`. The existing
 4. Interaction projection repair: terminal requests whose interaction result
    does not reflect the authoritative request/invocation state.
 
-The next branch is `codex/sleep-04-tool-review-expiry`. No implementation is
-claimed yet. Preserve the other three duties while migrating the first, then
+The next branch is `codex/sleep-04-tool-review-expiry`. Implementation now separates pending expiry with commit-aware signals and its
+existing deadline. Preserve the other three duties while migrating the first, then
 retire them individually. Keep the public/manual recovery entry point compatible
 or update all callers and tests explicitly; tests currently call the combined
 method to cause expiry.
@@ -98,8 +98,22 @@ Keep provider execution outside database transactions. Signals must be registere
 before writes in existing transaction ownership, without wrapping provider calls.
 
 Latest evidence: #17443 has all checks passed and both review threads resolved.
-#17446 at `d41590ac0e` has Greptile 5/5, no review threads, and two outstanding
-checks (Build and Paperclip Review) at the last inspection. #17450 at
-`75332b9641` has local verification (8 expiry + 92 gateway acceptance + 39 startup
-tests, workspace typecheck/build); CI and review are running. Recheck external
-state before using these observations as readiness evidence.
+#17446 at `d41590ac0e` has all checks passed, Greptile 5/5, and no review threads.
+#17450 at `c5c53fc43f` fixes the deadline query cost with bounded indexed lookups
+and an idempotent concurrent session index. Both findings are resolved; fresh
+Greptile is 5/5 and CI is running. Local migration/replay, 47 expiry/startup tests,
+workspace typecheck/build passed. A synthetic 40,000-row PostgreSQL plan reads
+one row from each expiry index. Recheck external state before readiness claims.
+
+Slice 04 now has 11 real-PostgreSQL worker lifecycle tests plus 59 existing
+service tests and 39 startup tests passing (109 total). The initial fixture
+incorrectly treated an argument-summary object as a string. After correction,
+the failure test exposed its invalid expectation of no idle hold during an
+unresolved write; it now checks rollback while retaining the hold. A combined
+run also exposed fixture cleanup ordering: this repository uses ordered hooks,
+so the worker must stop before the outer hook deletes rows. The corrected full
+selection passes. The current implementation adds a partial pending-expiry
+index, applies/replays its migration, and preserves approval-time rejection and
+separate approved/executing/projection recovery. Workspace typecheck/build and all 92 existing gateway acceptance tests also
+passed. The first acceptance command matched no files; the corrected
+`tool-gateway.test.ts` selection passed. Fresh PR CI/review remains required.
