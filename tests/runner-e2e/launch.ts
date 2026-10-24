@@ -1,3 +1,4 @@
+import { readUpgradeArtifacts, verifyUpgradeArtifact, upgradeArtifactKey } from "./upgrade-artifacts.js";
 import { recoverWorkerTiming } from "./worker-timing.js";
 import { openEvalOperations, type EvalOperations } from "./operations.js";
 import { readRecoveredFeedback } from "./feedback-recovery.js";
@@ -493,6 +494,15 @@ async function runAttempt(input: {
     throw new Error(
       "One isolated runner E2E harness cannot mix profiles or environments",
     );
+  }
+  const upgrades = await readUpgradeArtifacts(process.env[upgradeArtifactKey]);
+  if (upgrades) {
+    // All attempts and the browser use A's installed fixture admission. The
+    // supervisor changes only the server artifact; the original sandbox lives on.
+    Object.assign(process.env, upgrades.artifacts.A.pins);
+    for (const artifact of [upgrades.artifacts.A, upgrades.artifacts.B]) {
+      await verifyUpgradeArtifact(artifact, process.env, executions);
+    }
   }
   assertInstalledCliSelection(process.env, executions);
   const installedCli = await verifyInstalledCli(process.env, executions);

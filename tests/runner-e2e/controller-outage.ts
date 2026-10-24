@@ -1,3 +1,4 @@
+import type { ServingArtifact } from "./upgrade-artifacts.js";
 import { setTimeout as delay } from "node:timers/promises";
 
 export interface ControllerOutage {
@@ -15,6 +16,8 @@ export interface ControllerOutageReceipt extends ControllerOutage {
   cacheDiscarded?: boolean;
   replacementStartedAfterMs?: number;
   readyAfterMs?: number;
+  previousArtifact?: ServingArtifact;
+  replacementArtifact?: ServingArtifact;
 }
 
 export function parseControllerOutage(value: unknown): ControllerOutage {
@@ -47,6 +50,12 @@ export function validControllerOutageReceipt(value: unknown, expected?: Controll
     && r.replacementStartedAfterMs! - r.stoppedAfterMs! >= r.holdMs
     && r.readyAfterMs! >= r.replacementStartedAfterMs!
     && r.readyAfterMs! < 420_000
+    && ((!r.previousArtifact && !r.replacementArtifact) || Boolean(r.previousArtifact && r.replacementArtifact
+      && [r.previousArtifact, r.replacementArtifact].every(a => /^[a-f0-9]{40}$/.test(a.revision)
+        && /^[a-f0-9]{64}$/.test(a.treeSha256) && typeof a.version === "string"
+        && ["released", "development-build"].includes(a.evidence))
+      && r.previousArtifact.revision !== r.replacementArtifact.revision
+      && r.previousArtifact.treeSha256 !== r.replacementArtifact.treeSha256))
     && (requestId === undefined || r.requestId === requestId)
     && (!expected || (r.signal === expected.signal && r.holdMs === expected.holdMs));
 }
@@ -63,11 +72,14 @@ export async function replaceController<T extends { pid?: number }>(input: {
   waitForReady: (replacement: T) => Promise<void>;
   cancelled: () => boolean;
   record: (receipt: ControllerOutageReceipt) => Promise<void>;
+  previousArtifact?: ServingArtifact;
+  replacementArtifact?: () => ServingArtifact | undefined;
 }): Promise<ControllerOutageReceipt> {
   const outage = parseControllerOutage(input.outage);
   const started = performance.now();
   const receipt: ControllerOutageReceipt = { schema: "paperclip.e2e.controller-outage/v1",
-    requestId: input.requestId, previousPid: input.previousPid, startedAt: new Date().toISOString(), ...outage };
+    requestId: input.requestId, previousPid: input.previousPid, startedAt: new Date().toISOString(), ...outage,
+    ...(input.previousArtifact ? { previousArtifact: input.previousArtifact } : {}) };
   const check = () => { if (input.cancelled()) throw new Error("Wrapper shutdown interrupted the controller outage"); };
   const record = () => input.record({ ...receipt });
   check();
@@ -92,6 +104,10 @@ export async function replaceController<T extends { pid?: number }>(input: {
   await input.waitForReady(replacement);
   check();
   receipt.readyAfterMs = performance.now() - started;
+  if (input.previousArtifact) {
+    receipt.replacementArtifact = input.replacementArtifact?.();
+    if (!receipt.replacementArtifact) throw new Error("Replacement has no verified serving artifact");
+  }
   await record();
   if (!validControllerOutageReceipt(receipt, outage, input.requestId)) throw new Error("Controller outage did not produce a qualifying replacement receipt");
   return receipt;

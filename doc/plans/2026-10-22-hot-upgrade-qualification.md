@@ -49,6 +49,45 @@ oldest supported artifact and previous release, as well as compatible rollback.
 A frozen branch artifact is explicitly development-build evidence until releases
 exist; HTTP readiness or a replacement task is insufficient evidence of continuity.
 
+## Current execution evidence (2026-10-24)
+
+- Runner PR [#17097](https://github.com/paperclipai/paperclip/pull/17097)
+  contains the optional contract and one-process fixture. Server PR
+  [#17439](https://github.com/paperclipai/paperclip/pull/17439) contains its
+  Postgres consumer. Both remain drafts until their outstanding gates pass.
+- The fixture passed all three scenarios (external persistence, filesystem-only
+  consumer, and reconnect deadline); 191 controller/profile tests, 96 Rust
+  durability tests and 11 replay-parity tests passed on the initial split.
+- Real Postgres cost comparison: 8 and 512 text chunks each produced 8 checkpoint
+  writes, 7 transactions and 14 changed rows for identical control operations.
+  Both measured zero streaming checkpoint SQL/transactions/rows and zero idle
+  SQL. WAL was 37,408 and 37,528 bytes, respectively; this diagnostic is not a
+  production capacity estimate. Private receipt:
+  `/tmp/paperclip-hot-upgrade-pr2-sql-cost-20261024-2.json`.
+- Independent mutation tests passed for both a lost HTTP response after the
+  project row committed and a lost runner response after the API receipt was
+  saved. Each checked the business table independently and counted one dispatch.
+- The real-process recovery suite passed 35 cases and exposed one prepared-task
+  adoption failure: recovery lacked the original working directory. The runner
+  repair reads the checkpoint's original launch descriptor without re-preparing
+  resources; its focused process regression passed. The broader post-fix rerun
+  remains pending: macOS exhausted system-wide Postgres semaphores during setup.
+  No production reliability claim is based on the failed setup.
+- The initial runner slice passed workspace typecheck. The broad local test run
+  was interrupted after concurrent database campaigns exhausted host resources;
+  it is not a passing full-suite result. Three dependency-boundary violations
+  existed unchanged on the selected master baseline and remain to be resolved
+  or reported explicitly. CI and review completion are still pending.
+- Installed-artifact qualification now supports a manifest selected by
+  `PAPERCLIP_RUNNER_E2E_UPGRADE_ARTIFACTS`, with distinct A/B complete installation
+  tree hashes, entrypoint pins, baked-in build revisions and an A/B/A sequence.
+  The existing supervisor verifies each installed tree before launch and checks
+  `/api/health`'s actual serving commit. It never supplies a build SHA to the
+  server environment. The credential-free replacement smoke runs the sequence
+  against one surviving Postgres instance, but explicitly qualifies **zero agent
+  turns**. Active continuity, natural ownership/attachment phase receipts, full
+  300-second A/B and rollback runs, and hosted evidence remain outstanding.
+
 ## Evidence layers
 
 | Layer | Execution and owner | What it proves | Cadence |

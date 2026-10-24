@@ -1,3 +1,4 @@
+import { readUpgradeArtifacts, verifyUpgradeArtifact, assertServingArtifact, upgradeArtifactKey, type ServingArtifact } from "./upgrade-artifacts.js";
 import { parseFinalizationCrashBinding, readFinalizationCrashBoundary, type FinalizationCrashBinding } from "./finalization-crash-boundary.js";
 import { parseControllerOutage, replaceController, type ControllerOutage, type ControllerOutageReceipt } from "./controller-outage.js";
 import { parseRestartRunnerIdentity, type RestartRunnerIdentity } from "./process-tree-owner.js";
@@ -37,7 +38,9 @@ const port = required("PAPERCLIP_RUNNER_E2E_PORT");
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 const paperclipCli = path.join(repositoryRoot, "tests/runner-e2e/server-entry.ts");
 const executionIds: string[] = JSON.parse(process.env.PAPERCLIP_RUNNER_E2E_EXECUTION_IDS ?? "[]");
-const selectedExecutions = usesInstalledCli(process.env) ? executionIds.map(id => {
+const upgradeArtifacts = await readUpgradeArtifacts(process.env[upgradeArtifactKey]);
+let artifactIndex = 0;
+const selectedExecutions = usesInstalledCli(process.env) || upgradeArtifacts ? executionIds.map(id => {
   const execution = runnerMatrix.find(row => row.id === id);
   if (!execution) throw new Error("Unknown installed CLI proof execution");
   return execution;
@@ -49,8 +52,9 @@ const {
 } = runnerE2EServerControlPaths(temporaryRoot);
 const restartTimeoutMs = 180_000;
 const gracefulStopTimeoutMs = 30_000;
-const installedRelease = process.env.PAPERCLIP_RUNNER_E2E_INSTALLED_CLI
-  ? installedReleaseLaunch(process.env.PAPERCLIP_RUNNER_E2E_INSTALLED_CLI) : null;
+const initialCli = upgradeArtifacts?.artifacts.A.pins.PAPERCLIP_RUNNER_E2E_INSTALLED_CLI ?? process.env.PAPERCLIP_RUNNER_E2E_INSTALLED_CLI;
+const installedRelease = initialCli ? installedReleaseLaunch(initialCli) : null;
+const servingArtifacts = new WeakMap<ChildProcess, ServingArtifact>();
 const serverEnvironment = buildPaperclipServerEnvironment(installedRelease
   ? installedReleaseEnvironment(process.env, repositoryRoot, path.join(temporaryRoot, "provider-bin"))
   : process.env, {
@@ -105,7 +109,7 @@ const definedServerEnvironment = Object.fromEntries(
   ),
 );
 
-await prepareSourceServerDependencies(repositoryRoot, definedServerEnvironment, usesInstalledCli(process.env));
+await prepareSourceServerDependencies(repositoryRoot, definedServerEnvironment, Boolean(installedRelease));
 
 await Promise.all([
   mkdir(path.dirname(logPath), { recursive: true }),
@@ -184,13 +188,24 @@ async function startServer() {
     throw new Error("Refusing to start Paperclip after wrapper shutdown");
   }
   // Recheck bytes and dependency resolution on every controller restart.
-  const installed = await verifyInstalledCli(process.env, selectedExecutions);
+  const selected = upgradeArtifacts?.sequence[artifactIndex];
+  if (upgradeArtifacts && !selected) throw new Error("Upgrade artifact sequence exhausted");
+  const verified = selected ? await verifyUpgradeArtifact(upgradeArtifacts!.artifacts[selected], process.env, selectedExecutions) : undefined;
+  const installed = verified?.installed ?? await verifyInstalledCli(process.env, selectedExecutions);
+  const launch = installed ? installedReleaseLaunch(installed.entry) : null;
+  // The serving process must report its baked-in revision, never a test-supplied SHA.
+  const environment = { ...definedServerEnvironment };
+  if (upgradeArtifacts) {
+    delete environment.PAPERCLIP_BUILD_COMMIT;
+    delete environment[upgradeArtifactKey];
+    environment.GIT_CEILING_DIRECTORIES = upgradeArtifacts.artifacts[selected!].root;
+  }
   const candidate = spawn(
     process.execPath,
     installed ? [installed.entry, "onboard", "--yes", "--run"] : runnerE2ETypeScriptProcessArgs(repositoryRoot, paperclipCli, ["onboard", "--yes", "--run"]),
     {
-      cwd: installedRelease?.cwd ?? repositoryRoot,
-      env: definedServerEnvironment,
+      cwd: launch?.cwd ?? repositoryRoot,
+      env: environment,
       stdio: ["ignore", "pipe", "pipe"],
       // Playwright signals the wrapper's group. Keep that signal from bypassing
       // our single graceful stop; the launcher still tracks descendant groups.
@@ -198,6 +213,7 @@ async function startServer() {
     },
   );
   child = candidate;
+  if (verified) servingArtifacts.set(candidate, verified.receipt);
 
   candidate.stdout?.on("data", (chunk) => {
     process.stdout.write(chunk);
@@ -262,8 +278,13 @@ async function waitForHealth(candidate: ChildProcess) {
       const response = await fetch(healthUrl, {
         signal: AbortSignal.timeout(1_000),
       });
-      if (response.ok) return;
-    } catch {
+      if (response.ok) {
+        const artifact = servingArtifacts.get(candidate);
+        if (artifact) assertServingArtifact(await response.json(), artifact);
+        return;
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("serving server revision")) throw error;
       // The replacement process may still be booting.
     }
     await delay(250);
@@ -381,6 +402,8 @@ async function restartServer({ requestId, preserveRunner, discardControllerCache
     appendLog(`Restart request ${requestId}: old controller cache made unavailable\n`);
   };
   if (controllerOutage) {
+    if (upgradeArtifacts) artifactIndex += 1;
+    const previousArtifact = servingArtifacts.get(previous);
     const receipt = await replaceController({ requestId, previousPid: previous.pid!, outage: controllerOutage,
       stop: async signal => {
         if (signal === "SIGKILL") await stopServer.crashForRestart(previous);
@@ -388,6 +411,7 @@ async function restartServer({ requestId, preserveRunner, discardControllerCache
         if (child === previous) child = null;
       },
       waitForUnhealthy: waitForHealthToStop, discardCache, start: startServer, waitForReady: waitForHealth,
+      ...(previousArtifact ? { previousArtifact, replacementArtifact: () => child && servingArtifacts.get(child) || undefined } : {}),
       cancelled: shutdownRequested,
       record: async receipt => {
         const target = path.join(controlDirectory, `controller-outage-${requestId}.json`);
@@ -451,7 +475,8 @@ async function supervise() {
   });
   // Postgres needs the socket itself; release immediately before child spawn.
   await databaseReservation?.close();
-  await startServer();
+  const initial = await startServer();
+  if (upgradeArtifacts) await waitForHealth(initial);
   let lastRestartRequestId: string | null = null;
   while (!shutdownRequested()) {
     if (unexpectedChildFailure) throw unexpectedChildFailure;

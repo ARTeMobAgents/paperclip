@@ -1,3 +1,4 @@
+import { readUpgradeArtifacts, upgradeArtifactKey } from "./upgrade-artifacts.js";
 /** Credential-free main-server replacement. This proves the wrapper/startup/DB
  * boundary; only the hosted workflow can qualify an active Daytona agent.
  * Run: node cli/node_modules/tsx/dist/cli.mjs tests/runner-e2e/controller-replacement-smoke.ts
@@ -19,6 +20,7 @@ import { createRunnerE2EServerStopper } from "./server-stop.js";
 import { runnerE2ETypeScriptProcessArgs } from "./web-server-command.js";
 
 const outage = configuredControllerOutage(process.env);
+const upgrades = await readUpgradeArtifacts(process.env[upgradeArtifactKey]);
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 const temporaryRoot = await createRunnerE2ETemporaryRoot();
 const home = path.join(temporaryRoot, "home");
@@ -46,6 +48,7 @@ try {
   config.database = { ...config.database, mode: "postgres", connectionString: database.connectionString };
   await writeFile(configPath, JSON.stringify(config), { mode: 0o600 });
   const source = { PATH: process.env.PATH, HOME: home, TMPDIR: process.env.TMPDIR,
+    ...(upgrades ? { ...upgrades.artifacts.A.pins, [upgradeArtifactKey]: process.env[upgradeArtifactKey] } : {}),
     NODE_ENV: "test", PAPERCLIP_HOME: home, PAPERCLIP_CONFIG: configPath, PAPERCLIP_INSTANCE_ID: "default",
     PAPERCLIP_AGENT_JWT_SECRET: randomUUID(), PAPERCLIP_DECISION_SIGNING_SECRET: randomUUID(),
     PAPERCLIP_TOOL_ACTION_SIGNING_SECRET: randomUUID(), BETTER_AUTH_SECRET: randomUUID(),
@@ -79,25 +82,30 @@ try {
   await poll(() => api("/health").catch(() => null), health => health?.status === "ok", 180_000);
   const company = await api("/companies", { name: `Restart smoke ${randomUUID()}` });
   const [before] = await db.$client`select pg_postmaster_start_time()::text as started`;
-  // Empty fixture cache exercises retirement without pretending a runner exists.
-  const cache = path.join(home, "instances", "default", "runtime", "paperclip-runner");
-  await mkdir(cache, { recursive: true });
-  const requestId = `smoke-${randomUUID()}`;
-  await writeFile(`${control.restartRequestPath}.tmp`, JSON.stringify({ requestId, discardControllerCache: true, controllerOutage: outage }), { mode: 0o600 });
-  await rename(`${control.restartRequestPath}.tmp`, control.restartRequestPath);
-  const ack = await poll(async () => {
-    const value = await readFile(control.restartAcknowledgementPath, "utf8").then(text => JSON.parse(text) as Record<string, unknown>)
-      .catch(error => { if (error.code === "ENOENT") return null; throw error; });
-    if (value?.requestId === requestId && value.status === "failed") throw new Error(String(value.message));
-    return value;
-  }, value => value?.requestId === requestId && value.status === "ready", outage.holdMs + 180_000);
-  assert(validControllerOutageReceipt(ack!.controllerOutage, outage, requestId));
-  assert.equal((await api(`/companies/${company.id}`)).id, company.id);
-  const [after] = await db.$client`select pg_postmaster_start_time()::text as started`;
-  assert.equal(after.started, before.started, "Postgres must remain alive across the web-server replacement");
-  await api("/companies", { name: `New admission after restart ${randomUUID()}` });
-  Object.assign(report, { controllerOutage: ack!.controllerOutage, postgresStayedAlive: true,
-    existingDataReadable: true, newMutationAccepted: true, passed: true });
+  const receipts: unknown[] = [];
+  for (let index = 1; index < (upgrades?.sequence.length ?? 2); index += 1) {
+    // Empty fixture cache exercises retirement without pretending a runner exists.
+    const cache = path.join(home, "instances", "default", "runtime", "paperclip-runner");
+    await mkdir(cache, { recursive: true });
+    const requestId = `smoke-${index}-${randomUUID()}`;
+    await writeFile(`${control.restartRequestPath}.tmp`, JSON.stringify({ requestId, discardControllerCache: true, controllerOutage: outage }), { mode: 0o600 });
+    await rename(`${control.restartRequestPath}.tmp`, control.restartRequestPath);
+    const ack = await poll(async () => {
+      const value = await readFile(control.restartAcknowledgementPath, "utf8").then(text => JSON.parse(text) as Record<string, unknown>)
+        .catch(error => { if (error.code === "ENOENT") return null; throw error; });
+      if (value?.requestId === requestId && value.status === "failed") throw new Error(String(value.message));
+      return value;
+    }, value => value?.requestId === requestId && value.status === "ready", outage.holdMs + 180_000);
+    assert(validControllerOutageReceipt(ack!.controllerOutage, outage, requestId));
+    receipts.push(ack!.controllerOutage);
+    report.replacements = receipts;
+    await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
+    assert.equal((await api(`/companies/${company.id}`)).id, company.id);
+    const [after] = await db.$client`select pg_postmaster_start_time()::text as started`;
+    assert.equal(after.started, before.started, "Postgres must remain alive across the web-server replacement");
+    await api("/companies", { name: `New admission after restart ${randomUUID()}` });
+  }
+  Object.assign(report, { postgresStayedAlive: true, existingDataReadable: true, newMutationAccepted: true, passed: true });
   await stopper.stopAll();
   await stopped;
 } catch (error) {

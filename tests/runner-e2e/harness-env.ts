@@ -206,7 +206,7 @@ export function buildPaperclipServerEnvironment(
   ]) {
     delete result[key];
   }
-  for (const key of [...GENERATED_SERVER_SECRET_KEYS, ...installedCliKeys, ...installedDaytonaPluginKeys]) delete result[key];
+  for (const key of [...GENERATED_SERVER_SECRET_KEYS, ...installedCliKeys, ...installedDaytonaPluginKeys, "PAPERCLIP_RUNNER_E2E_UPGRADE_ARTIFACTS"]) delete result[key];
   Object.assign(result, overrides);
   return result;
 }
