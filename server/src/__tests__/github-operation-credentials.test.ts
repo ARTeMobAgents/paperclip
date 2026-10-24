@@ -636,6 +636,23 @@ const support = await getEmbeddedPostgresTestSupport();
         status: "available", source: "organization", login: "robot",
       });
       expect((await resolveManagedGitHubIdentitySelection(db, input.companyId, input)).grant?.id).toBe(shared.id);
+      await db.update(toolConnections).set({ credentialPolicy: "per_user" })
+        .where(eq(toolConnections.id, shared.connectionId));
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: "unavailable", env: {},
+      });
+      await db.update(toolConnections).set({ credentialPolicy: "per_agent" })
+        .where(eq(toolConnections.id, shared.connectionId));
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: "unavailable", env: {},
+      });
+      await db.update(toolConnections).set({ credentialPolicy: "per_user_with_fallback" })
+        .where(eq(toolConnections.id, shared.connectionId));
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: "available", source: "organization", login: "robot",
+      });
+      await db.update(toolConnections).set({ credentialPolicy: "shared" })
+        .where(eq(toolConnections.id, shared.connectionId));
 
       await db.insert(connectionGrantMembers).values({
         companyId: input.companyId,

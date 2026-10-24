@@ -4628,6 +4628,9 @@ export function createToolGatewayService(
         }
       }
       if (selected.grant.kind === "organization") {
+        if (connection.credentialPolicy !== "shared" && connection.credentialPolicy !== "per_user_with_fallback") {
+          throw new ToolGatewayHttpError(403, "This connection requires a personal or dedicated grant", "organization_authorization_required");
+        }
         const audience = await db.select({ subjectId: connectionGrantMembers.subjectId })
           .from(connectionGrantMembers).where(and(
             eq(connectionGrantMembers.companyId, session.companyId),

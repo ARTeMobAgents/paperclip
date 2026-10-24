@@ -363,7 +363,11 @@ export async function resolveManagedGitHubIdentitySelection(
     : [];
   // Organization grants are eligible only inside their own company and audience.
   // The connection install alone does not authorize a restricted grant audience.
-  const organizationGrants = grants.filter((grant) => grant.kind === "organization" && grant.isDefault && grant.status === "active");
+  const organizationGrants = grants.filter((grant) => {
+    const connection = githubConnections.find((candidate) => candidate.id === grant.connectionId);
+    return grant.kind === "organization" && grant.isDefault && grant.status === "active"
+      && (connection?.credentialPolicy === "shared" || connection?.credentialPolicy === "per_user_with_fallback");
+  });
   const audienceRows = organizationGrants.length > 0
     ? await db.select({ grantId: connectionGrantMembers.grantId, subjectId: connectionGrantMembers.subjectId })
         .from(connectionGrantMembers).where(and(

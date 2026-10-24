@@ -96,7 +96,8 @@ An unavailable or ambiguous managed identity fails visibly. It never falls
 through to another person or a legacy token. An explicit dedicated grant still
 overrides this order, even when that grant is unavailable. A paused or otherwise
 unavailable personal grant does not trigger the organization exception. The
-organization grant's user audience is checked independently of installation;
+organization grant's user audience and the connection's `shared` or
+`per_user_with_fallback` policy are checked independently of installation;
 the exception is off unless an operator sets it on that shared connection.
 Agent grants are company-scoped, have exactly one `subjectAgentId`, cannot be
 organization defaults, and are installed only for that agent.
