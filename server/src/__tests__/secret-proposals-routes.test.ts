@@ -307,7 +307,7 @@ describeEmbeddedPostgres("secret proposal routes", () => {
       }).catch(error => { if (error !== rollbackError) throw error; });
       await staged;
       try {
-        await settle();
+        await vi.advanceTimersByTimeAsync(60_000);
         expect(await proposals.nextExpiryAt()).toBeNull();
       } finally { release(); }
       await writing; await settle();
@@ -317,7 +317,7 @@ describeEmbeddedPostgres("secret proposal routes", () => {
 
     it("reconstructs a deadline after restart and disarms when the proposer withdraws", async () => {
       const secret = await create();
-      await start();
+      await start(); await settle();
       expect(coordinator!.nextWakeAt()).toBe(secret.expiresAt.getTime());
       await proposals.transition(fixture.companyId, secret.id, "withdrawn", { proposerAgentId: fixture.agentId });
       await quiet();
