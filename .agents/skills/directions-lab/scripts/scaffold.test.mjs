@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -471,6 +472,58 @@ describe("rendering the three eval shapes", () => {
       assert.match(result.errors[0], /status should be "proposed" \(mode A, lab stage historical\)/);
     } finally {
       for (const [file, text] of Object.entries(originals)) writeFileSync(file, text);
+    }
+  });
+});
+
+describe("review fixes", () => {
+  it("quotes hyphenated surface ids so kit.ts and SurfaceView.tsx parse", () => {
+    const root = makeRoot();
+    try {
+      const result = run(["new", "--slug", "hyphen", "--surfaces", "right-panel:Right-panel:434@tasks,thread:Task-thread:960@tasks", "--directions", "2", "--skip-verify"], { root });
+      assert.equal(result.code, 0, result.out);
+      const kit = readFileSync(path.join(root, "ui/src/hyphen-directions/kit.ts"), "utf8");
+      const view = readFileSync(path.join(root, "ui/src/hyphen-directions/frames/SurfaceView.tsx"), "utf8");
+      assert.match(kit, /  "right-panel": \{ items: LabRecord\[\] \};/);
+      assert.match(view, /  "right-panel": RightPanelFrame,/);
+      const esbuild = createRequire(path.join(REPO_ROOT, "ui/package.json"))("esbuild");
+      for (const [file, source] of [["kit.ts", kit], ["SurfaceView.tsx", view]]) {
+        assert.doesNotThrow(() => esbuild.transformSync(source, { loader: file.endsWith("x") ? "tsx" : "ts", jsx: "automatic" }), file);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls back written files and launch entries when a shared-file edit throws", () => {
+    const root = makeRoot();
+    try {
+      const launchBefore = readFileSync(path.join(root, ".claude/launch.json"), "utf8");
+      rmSync(path.join(root, ".gitignore"));
+      mkdirSync(path.join(root, ".gitignore"));
+      const result = run(["new", ...SHAPES.composer.slice(0), "--skip-verify"], { root });
+      assert.equal(result.code, 1, result.out);
+      assert.match(result.out, /Rolled back every written path/);
+      assert.equal(existsSync(path.join(root, "ui/src/composer-directions")), false);
+      assert.equal(existsSync(path.join(root, "ui/composer-directions.html")), false);
+      assert.equal(readFileSync(path.join(root, ".claude/launch.json"), "utf8"), launchBefore);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses add-direction once the slot props no longer match the placeholder", () => {
+    const root = makeRoot();
+    try {
+      assert.equal(run(["new", ...SHAPES.composer, "--skip-verify"], { root }).code, 0);
+      const kitFile = path.join(root, "ui/src/composer-directions/kit.ts");
+      writeFileSync(kitFile, readFileSync(kitFile, "utf8").replace('"thread": { items: LabRecord[] };', '"thread": { workProducts: string[] };'));
+      const result = run(["add-direction", "--slug", "composer", "--name", "Bold", "--force-count", "--skip-verify"], { root });
+      assert.equal(result.code, 1, result.out);
+      assert.match(result.out, /no longer match the scaffold's placeholder \(thread\)/);
+      assert.equal(existsSync(path.join(root, "ui/src/composer-directions/directions/d4-bold")), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

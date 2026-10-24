@@ -11,7 +11,7 @@ import { findLabs, insertDirection, insertDirectionStory, readRegistry, Registry
 import { launchEntries, renderDirection, renderLab } from "./lib/render.mjs";
 import { addGitignoreLine, addLaunchEntries, restoreShared } from "./lib/shared-files.mjs";
 import { describeFailure, runVerification, verificationSteps } from "./lib/verify.mjs";
-import { checkRendered, rollback, writeFiles } from "./lib/write.mjs";
+import { checkRendered, newJournal, rollback, writeFiles } from "./lib/write.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const DEFAULT_ROOT = path.resolve(SCRIPT_DIR, "../../../..");
@@ -72,14 +72,29 @@ async function commandNew(flags) {
     return 0;
   }
   const progress = flags.json ? (...parts) => console.error(...parts) : log;
-  const journal = writeFiles(files, { root });
-  const shared = [addLaunchEntries(root, launch.entries), addGitignoreLine(root, ctx.distDir)];
-  progress(`Wrote ${files.size} files under ${root} for ${ctx.labDir}; edited .claude/launch.json and .gitignore`);
+  const journal = newJournal();
+  const shared = [];
+  const undo = () => {
+    rollback(journal);
+    restoreShared(shared);
+    for (const dir of [path.join(root, "ui", ctx.staticDir), path.join(root, "ui/node_modules", `.vite-${ctx.slug}-directions-${ctx.ports.dev}`)]) rmSync(dir, { recursive: true, force: true });
+  };
   let verification = { ok: true, results: [] };
-  if (!flags["skip-verify"]) {
-    verification = runVerification(root, verificationSteps(ctx, { noBuild: flags["no-build"] }), {
-      onStep: (result) => progress(`${result.ok ? "ok  " : "FAIL"} ${result.label}: ${result.command}`),
-    });
+  try {
+    writeFiles(files, { root, journal });
+    shared.push(addLaunchEntries(root, launch.entries));
+    shared.push(addGitignoreLine(root, ctx.distDir));
+    progress(`Wrote ${files.size} files under ${root} for ${ctx.labDir}; edited .claude/launch.json and .gitignore`);
+    if (!flags["skip-verify"]) {
+      verification = runVerification(root, verificationSteps(ctx, { noBuild: flags["no-build"] }), {
+        onStep: (result) => progress(`${result.ok ? "ok  " : "FAIL"} ${result.label}: ${result.command}`),
+      });
+    }
+  } catch (error) {
+    undo();
+    console.error(`scaffold: ${error.message}`);
+    console.error("Rolled back every written path and restored .claude/launch.json and .gitignore.");
+    return 1;
   }
   if (!verification.ok) {
     const failed = verification.results.find((result) => !result.ok);
@@ -87,9 +102,7 @@ async function commandNew(flags) {
     if (flags["keep-on-failure"]) {
       console.error(`Kept the written files for inspection (--keep-on-failure). Remove them with: rm -rf ${ctx.labDir} ui/${ctx.entry} ui/${ctx.configFile} ${ctx.storyFile}`);
     } else {
-      rollback(journal);
-      restoreShared(shared);
-      for (const dir of [path.join(root, "ui", ctx.staticDir), path.join(root, "ui/node_modules", `.vite-${ctx.slug}-directions-${ctx.ports.dev}`)]) rmSync(dir, { recursive: true, force: true });
+      undo();
       console.error("Rolled back every written path and restored .claude/launch.json and .gitignore.");
     }
     return 1;
@@ -175,17 +188,40 @@ async function commandAddDirection(flags) {
   const storyFile = path.join(root, `ui/storybook/stories/design-proposals/${registry.slug}-directions.stories.tsx`);
   if (!existsSync(storyFile)) throw new UsageError(`${path.relative(root, storyFile)} is missing`);
   const storyText = readFileSync(storyFile, "utf8");
+  const kitFile = path.join(labDir, "kit.ts");
+  const changed = changedSlotContracts(existsSync(kitFile) ? readFileSync(kitFile, "utf8") : "", ctx.surfaces);
+  if (changed.length) {
+    throw new UsageError(
+      `the slot props in ui/src/${registry.slug}-directions/kit.ts no longer match the scaffold's placeholder (${changed.join(", ")}), ` +
+        "so a generated kit would not fit them. Add the direction by hand: copy an existing exploration's directory to " +
+        `directions/${direction.id}, rename its id, name, tagline and --<prefix>- tokens, then add its registry entry and the D${digit} story export.`,
+    );
+  }
   const next = insertDirection(text, direction, { file: path.relative(root, registryFile), allowMore: digit > 3 });
   const nextStory = insertDirectionStory(storyText, direction, path.relative(root, storyFile));
-  const journal = writeFiles(files, { root });
-  writeFileSync(registryFile, next);
-  writeFileSync(storyFile, nextStory);
-  const check = checkLab(root, registry.slug, { skipVerify: Boolean(flags["skip-verify"]) });
-  if (check.errors.length) {
+  const journal = newJournal();
+  const undo = () => {
     rollback(journal);
     writeFileSync(registryFile, text);
     writeFileSync(storyFile, storyText);
-    for (const error of check.errors) console.error(`FAIL ${error}`);
+  };
+  let errors = [];
+  try {
+    writeFiles(files, { root, journal });
+    writeFileSync(registryFile, next);
+    writeFileSync(storyFile, nextStory);
+    errors = checkLab(root, registry.slug, { skipVerify: Boolean(flags["skip-verify"]) }).errors;
+    if (!errors.length && !flags["skip-verify"]) {
+      const steps = verificationSteps(ctx, { noBuild: true }).filter((step) => step.label === "lab vitest");
+      const verification = runVerification(root, steps);
+      if (!verification.ok) errors = [describeFailure(verification.results.find((result) => !result.ok))];
+    }
+  } catch (error) {
+    errors = [error.message];
+  }
+  if (errors.length) {
+    undo();
+    for (const error of errors) console.error(`FAIL ${error}`);
     console.error("Rolled the new direction back.");
     return 1;
   }
@@ -195,6 +231,13 @@ async function commandAddDirection(flags) {
     log(`Next: cd ui && npx vitest run src/${registry.slug}-directions`);
   }
   return 0;
+}
+
+export function changedSlotContracts(kitText, surfaces) {
+  if (!/export interface LabRecord \{/.test(kitText)) return ["LabRecord"];
+  return surfaces
+    .filter((surface) => ![`  ${JSON.stringify(surface.id)}: { items: LabRecord[] };`, `  ${surface.id}: { items: LabRecord[] };`].some((line) => kitText.includes(line)))
+    .map((surface) => surface.id);
 }
 
 export async function main(argv) {

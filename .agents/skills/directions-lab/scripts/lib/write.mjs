@@ -31,8 +31,11 @@ export function checkRendered(files, { root }) {
   return errors;
 }
 
-export function writeFiles(files, { root }) {
-  const journal = { files: [], dirs: [] };
+export function newJournal() {
+  return { files: [], dirs: [] };
+}
+
+export function writeFiles(files, { root, journal = newJournal() }) {
   for (const [relative] of files) {
     let dir = path.dirname(path.join(root, relative));
     const missing = [];

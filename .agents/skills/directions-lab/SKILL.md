@@ -246,7 +246,9 @@ Tonio says yes.
   The toolbar legend follows the registry at runtime. The generator refuses a
   fourth without `--force-count`, which also records `allowMore` in the
   registry; the story description's "1–N" sentence is the one thing to
-  update by hand.
+  update by hand. Once phase 2 has retyped the slot props in `kit.ts`,
+  `add-direction` refuses and prints the by-hand steps instead, because a
+  generated kit would not fit the new props.
 - List labs: `scaffold.mjs list`.
 - Rename a direction, add a surface, or move a direction through the
   lifecycle: by hand, following `references/lab-anatomy.md` section 5 and 8

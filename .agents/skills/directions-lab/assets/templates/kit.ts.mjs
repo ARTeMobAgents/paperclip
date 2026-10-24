@@ -13,7 +13,7 @@ export interface LabRecord {
 }
 
 export interface SurfaceData extends Record<SurfaceId, unknown> {
-${ctx.surfaces.map((surface) => `  ${surface.id}: { items: LabRecord[] };`).join("\n")}
+${ctx.surfaces.map((surface) => `  ${JSON.stringify(surface.id)}: { items: LabRecord[] };`).join("\n")}
 }
 
 export interface DirectionKit {
