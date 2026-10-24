@@ -428,6 +428,36 @@ unacknowledged facts.
 The production durable control plane and live-session suites cover reconnect,
 ACK replay, restart recovery, backpressure, lease expiry, drain, and revoke.
 
+`src/control-plane/runner-recovery-fixture.test.ts` builds the test-only Cargo
+example `recovery-fixture`. It links the unchanged production durable runner with
+a scripted `CommandExecutor`, whose worker thread performs bounded hashing steps
+and retains each resulting output until the normal executor ACK transfers it to
+the runner outbox. There is one process, no HTTP counter service, and no production
+provider-admission switch. Private fixture receipts report completed steps, queue
+depth and process identity; they do not acknowledge or recover protocol events.
+
+The short experiment starts one turn, removes the controller, then releases real
+work. Eight retained events fill the fixture queue and pause work explicitly.
+A replacement authenticates and drains through PRP. At step 32 the executor waits
+for a controller command, survives another replacement, then completes 64 steps
+without repeating the turn. The test runs with ordinary filesystem persistence
+and with opaque external checkpoints restored onto empty controller storage.
+An independent short-deadline case checks termination with recovery state intact.
+These prove the runner mechanism, not Codex, Claude, Daytona or application
+authorization. Server adoption and installed-artifact qualification have separate
+owners and evidence.
+
+Run the short experiment from this package with:
+
+```sh
+pnpm exec vitest run src/control-plane/runner-recovery-fixture.test.ts --maxWorkers=1
+```
+
+The fixture builds through Cargo during test setup. Production distribution builds
+do not include the example. Existing control-plane tests separately inject failed
+checkpoint persistence, stale/unauthenticated cursors and output floods, including
+the zero-per-text-checkpoint-write gate.
+
 Use `--json` for the complete trace or `--output <path>` to write it. The CLI
 and browser show connection counts, safe lease ID and expiry, stable identities,
 source and ACK cursors, outbox current/peak bytes, command delivery/effect
