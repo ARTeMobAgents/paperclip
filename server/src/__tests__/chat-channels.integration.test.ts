@@ -5633,6 +5633,9 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       expect(f.wakeup).not.toHaveBeenCalled();
       const allowed = { ...payload, sender: { id: 42, login: "octocat", type: "User" }, issue: { ...payload.issue, user: payload.sender } };
       await send(allowed);
+      // A transient `chat_endpoints` row lock defers admission with a retry
+      // floor of 1000 ms (`chat-channels/inbound/wakeups.ts`), so allow one
+      // deferred retry instead of the 1000 ms poll default.
       await expect.poll(async () => (await readChatConversationsByEndpointId(f.endpoint.id)).length, { timeout: 10_000 }).toBe(1);
       const [conversation] = await readChatConversationsByEndpointId(f.endpoint.id);
       const comments = await readIssueCommentsByIssueId(conversation.issueId!);
