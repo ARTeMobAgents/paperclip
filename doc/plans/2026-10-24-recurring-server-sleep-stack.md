@@ -162,3 +162,20 @@ Current parent CI note: #17450 at `c5c53fc43f` has Greptile 5/5. Its server shar
 All 16 login-cleanup tests passed locally on recheck. The run remains active;
 an attempted single-job rerun was rejected as not rerunnable. Recheck after the
 run finishes before requesting its one justified retry. Do not report it green.
+
+
+Slice 05 implementation now separates approved recovery from the aggregate tick.
+The existing review notification boundary wakes it after outer commit. Legacy
+inert approvals and completed Test-tab history become quiet; unresolved work
+retains a retry. Test-tab foreground and recovery share a claim and atomic outcome
+settlement. No provider call occurs inside that transaction. See
+[approved recovery](../idle-approved-tool-recovery.md). Local service/startup
+verification passes 122 tests, gateway acceptance passes 92, and workspace
+typecheck/build pass. Paging and outcome-failure tests passed again after their
+final strengthening. Full CI/review is not yet complete.
+
+Parent CI follow-up: #17450's completed run was retried once for its unchanged
+login-cleanup timeout after all 16 local tests passed. #17453 has a Runner
+prepared-launch close failure. Seven focused local Runner cases also fail, so
+this is under investigation rather than assumed flaky. No retry of that run has
+been requested. Neither parent is reported green without fresh evidence.
