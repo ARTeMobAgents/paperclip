@@ -1,3 +1,4 @@
+import { toolReviewInterruptionService } from "./tool-review-interruption.js";
 import { claimToolTestApproval, persistToolTestOutcome, startToolTestInvocation, type ToolTestApprovalClaim } from "./tool-test-approval.js";
 import { recoverApprovedToolReviews } from "./tool-review-recovery.js";
 import { toolReviewExpiryService } from "./tool-review-expiry.js";
@@ -44,7 +45,6 @@ import {
   asc,
   desc,
   eq,
-  gt,
   inArray,
   isNull,
   lte,
@@ -7767,7 +7767,7 @@ export function createToolGatewayService(
     const message =
       input.error instanceof Error ? input.error.message : String(input.error);
     const now = new Date();
-    const settled = await db.transaction(async (tx) => {
+    const settled = await writeToolReviewChange(db, async (tx) => {
       // Lock in the same invocation -> request order used by the normal
       // execution settlement path. The claim timestamp is the ownership token:
       // a consumer that merely read an approved row cannot settle another
@@ -8286,10 +8286,10 @@ export function createToolGatewayService(
         })
         .where(eq(toolInvocations.id, invocation.id));
       void emitConnectionInvoked(db, invocation.id);
-      await db
+      await writeToolReviewChange(db, tx => tx
         .update(toolActionRequests)
         .set({ status: "executed", resolvedAt: now, updatedAt: now })
-        .where(eq(toolActionRequests.id, claimed.id));
+        .where(eq(toolActionRequests.id, claimed.id)));
       await reflectToolActionInteractionLifecycle({
         actionRequestId: claimed.id,
         status: "executed",
@@ -8627,6 +8627,11 @@ export function createToolGatewayService(
         : null,
     };
   }
+
+  const reviewInterruption = toolReviewInterruptionService(db, async settled => {
+    void emitConnectionInvoked(db, settled.invocationId);
+    await reflectToolActionInteractionLifecycle(settled);
+  });
 
   const reviewExpiry = toolReviewExpiryService(db, async expired => {
     void emitConnectionInvoked(db, expired.invocationId);
@@ -9646,6 +9651,8 @@ export function createToolGatewayService(
       return buildTestCallStatus(actionRequest, invocation);
     },
 
+    settleInterruptedActionReviews: reviewInterruption.sweep,
+    nextActionReviewInterruptionAt: reviewInterruption.next,
     sweepExpiredActionReviews: reviewExpiry.sweep,
     nextActionReviewExpiryAt: reviewExpiry.next,
 
@@ -9673,7 +9680,7 @@ export function createToolGatewayService(
       });
     },
 
-    async sweepActionReviews(input: { includeExpiry?: boolean; includeApproved?: boolean } = {}) {
+    async sweepActionReviews(input: { includeExpiry?: boolean; includeApproved?: boolean; includeInterrupted?: boolean } = {}) {
       // A process may stop between persisting a provider outcome and updating the
       // feed projection. Reconcile from authoritative rows before delivering it.
       const unreflected = await db
@@ -9708,62 +9715,9 @@ export function createToolGatewayService(
           errorMessage: invocation.errorMessage,
           resultSummary: invocation.resultSummary?.summary,
         });
-      const now = new Date();
-      const staleAt = new Date(now.getTime() - 10 * 60_000);
-      let cursor: string | undefined;
-      let scanned = input.includeExpiry === false ? 0 : (await reviewExpiry.sweep(now)).scanned;
+      let scanned = input.includeExpiry === false ? 0 : (await reviewExpiry.sweep()).scanned;
       if (input.includeApproved !== false) scanned += (await this.recoverApprovedActionReviews()).scanned;
-      for (;;) {
-        const rows = await db
-          .select()
-          .from(toolActionRequests)
-          .where(
-            and(
-              eq(toolActionRequests.status, "executing"),
-              lte(toolActionRequests.updatedAt, staleAt),
-              cursor ? gt(toolActionRequests.id, cursor) : undefined,
-            ),
-          )
-          .orderBy(asc(toolActionRequests.id))
-          .limit(100);
-        for (const row of rows) {
-          const status = "failed";
-          const errorCode = "tool_execution_outcome_unknown";
-          const errorMessage = "Execution was interrupted; the external outcome is unknown. Inspect the provider before retrying.";
-          const [changed] = await db
-            .update(toolActionRequests)
-            .set({ status, resolvedAt: now, updatedAt: now })
-            .where(
-              and(
-                eq(toolActionRequests.id, row.id),
-                eq(toolActionRequests.status, row.status),
-                eq(toolActionRequests.updatedAt, row.updatedAt),
-              ),
-            )
-            .returning();
-          if (!changed) continue;
-          await db
-            .update(toolInvocations)
-            .set({
-              status: "failed",
-              errorCode,
-              errorMessage,
-              completedAt: now,
-              updatedAt: now,
-            })
-            .where(eq(toolInvocations.id, row.invocationId));
-          void emitConnectionInvoked(db, row.invocationId);
-          await reflectToolActionInteractionLifecycle({
-            actionRequestId: row.id,
-            status,
-            errorCode,
-            errorMessage,
-          });
-        }
-        scanned += rows.length;
-        if (rows.length < 100) break;
-        cursor = rows[rows.length - 1].id;
-      }
+      if (input.includeInterrupted !== false) scanned += (await reviewInterruption.sweep()).scanned;
       return { scanned };
     },
 
@@ -10961,7 +10915,8 @@ export function createToolGatewayService(
           })
           .where(eq(toolInvocations.id, invocationId));
         if (input.approvedActionRequestId) {
-          const [executedRequest] = await db
+          const actionRequestId = input.approvedActionRequestId;
+          const [executedRequest] = await writeToolReviewChange(db, tx => tx
             .update(toolActionRequests)
             .set({
               status: "executed",
@@ -10970,11 +10925,11 @@ export function createToolGatewayService(
             })
             .where(
               and(
-                eq(toolActionRequests.id, input.approvedActionRequestId),
+                eq(toolActionRequests.id, actionRequestId),
                 eq(toolActionRequests.status, "executing"),
               ),
             )
-            .returning({ id: toolActionRequests.id });
+            .returning({ id: toolActionRequests.id }));
           if (executedRequest) {
             await reflectToolActionInteractionLifecycle({
               actionRequestId: executedRequest.id,
@@ -11094,7 +11049,8 @@ export function createToolGatewayService(
           .where(eq(toolInvocations.id, invocationId));
         void emitConnectionInvoked(db, invocationId);
         if (input.approvedActionRequestId) {
-          const [failedRequest] = await db
+          const actionRequestId = input.approvedActionRequestId;
+          const [failedRequest] = await writeToolReviewChange(db, tx => tx
             .update(toolActionRequests)
             .set({
               status: "failed",
@@ -11103,11 +11059,11 @@ export function createToolGatewayService(
             })
             .where(
               and(
-                eq(toolActionRequests.id, input.approvedActionRequestId),
+                eq(toolActionRequests.id, actionRequestId),
                 eq(toolActionRequests.status, "executing"),
               ),
             )
-            .returning({ id: toolActionRequests.id });
+            .returning({ id: toolActionRequests.id }));
           if (failedRequest) {
             await reflectToolActionInteractionLifecycle({
               actionRequestId: failedRequest.id,

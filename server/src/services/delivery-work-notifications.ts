@@ -8,6 +8,7 @@ export const DELIVERY_QUEUES = {
   executionStatus: "execution-status",
   executionDisposition: "execution-disposition",
   environmentCleanup: "environment-cleanup",
+  toolReviewInterruption: "tool-review-interruption",
   toolReviewRecovery: "tool-review-recovery",
   toolReviewExpiry: "tool-review-expiry",
   gatewayCredentialExpiry: "gateway-credential-expiry",

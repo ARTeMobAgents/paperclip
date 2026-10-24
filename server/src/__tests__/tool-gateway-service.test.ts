@@ -1,3 +1,5 @@
+import { registerToolReviewInterruptionWork } from "../services/tool-review-interruption-work.js";
+import { writeToolReviewChange } from "../services/tool-review-work-notifications.js";
 import { subscribeDeliveryWork } from "../services/delivery-work-notifications.js";
 import { DELIVERY_QUEUES } from "../services/delivery-work-notifications.js";
 import { randomUUID } from "node:crypto";
@@ -310,6 +312,186 @@ describeEmbeddedPostgres("tool gateway service", () => {
       expect(await db.select().from(toolCallEvents).where(eq(toolCallEvents.reasonCode, "approved_action_executed"))).toEqual([]);
     }
 
+    async function testRequest(provider: NonNullable<ToolGatewayServiceOptions["remoteHttpRequest"]>) {
+      await db.insert(companyMemberships).values({ companyId: fixture.company.id, principalType: "user",
+        principalId: "board", status: "active", membershipRole: "owner" });
+      const remote = await createRemoteMcpToolFixture(db, fixture.company.id);
+      await db.update(toolCatalogEntries).set({ isReadOnly: false, riskLevel: "write" })
+        .where(eq(toolCatalogEntries.id, remote.catalogEntry.id));
+      await db.insert(toolPolicies).values({ companyId: fixture.company.id, name: "Review connected writes",
+        policyType: "require_approval", priority: 10, selectors: { connectionId: remote.connection.id } });
+      gateway = createTestToolGatewayService(db, { remoteHttpRequest: provider });
+      const result = await gateway.executeTestCall({ companyId: fixture.company.id, connectionId: remote.connection.id,
+        agentId: fixture.agent.id, userId: "board", toolName: "needs_input", parameters: { value: "reviewed" } });
+      expect(result.decision).toBe("ask_first");
+      const [pending] = await db.select().from(toolActionRequests);
+      return { pending, remote };
+    }
+    function providerFixture() {
+      let release!: () => void, entered!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      const provider = vi.fn(async (_url, init) => {
+        const payload = JSON.parse(String(init.body));
+        expect(payload.method).toBe("tools/call");
+        entered(); await gate;
+        return Response.json({ jsonrpc: "2.0", id: payload.id,
+          result: { content: [{ type: "text", text: "Saved once" }] } });
+      });
+      return { provider, release, started };
+    }
+
+    describe("interrupted review recovery worker", () => {
+      async function startInterruption() {
+        coordinator = createDeliveryWorkCoordinator({ owner: db, canRun: () => !draining,
+          canReconcile: () => true, onError: error => errors.push(error) });
+        await registerToolReviewInterruptionWork(coordinator, gateway, () => !draining).ready;
+      }
+      async function savedClaim(source = db, age = 0) {
+        const pending = await request();
+        const claimedAt = new Date(Date.now() - age);
+        await writeToolReviewChange(source, async tx => {
+          await tx.update(toolInvocations).set({ status: "executing", startedAt: claimedAt, updatedAt: claimedAt })
+            .where(eq(toolInvocations.id, pending.invocationId));
+          await tx.update(toolActionRequests).set({ status: "executing", updatedAt: claimedAt })
+            .where(eq(toolActionRequests.id, pending.id));
+        });
+        return { ...pending, updatedAt: claimedAt };
+      }
+      async function unknown(pending: Awaited<ReturnType<typeof request>>) {
+        expect((await db.select().from(toolActionRequests).where(eq(toolActionRequests.id, pending.id)))[0].status).toBe("failed");
+        expect((await db.select().from(toolInvocations).where(eq(toolInvocations.id, pending.invocationId)))[0])
+          .toMatchObject({ status: "failed", errorCode: "tool_execution_outcome_unknown" });
+      }
+
+      it("arms from a real execution claim and disarms after the provider result", async () => {
+        await startInterruption(); await quiet();
+        const remote = providerFixture();
+        const { pending } = await testRequest(remote.provider);
+        const running = gateway.approveActionRequest({ companyId: fixture.company.id,
+          actionRequestId: pending.id, actor: { userId: "board" } });
+        await Promise.race([remote.started, running]);
+        try {
+          await settle();
+          const [claim] = await db.select().from(toolActionRequests);
+          expect(claim.status).toBe("executing");
+          expect(coordinator!.nextWakeAt()).toBe(claim.updatedAt.getTime() + 10 * 60_000);
+          const reads = vi.spyOn(db, "select");
+          await settle(60_000); expect(reads).not.toHaveBeenCalled(); reads.mockRestore();
+        } finally { remote.release(); }
+        await running; await quiet();
+        expect((await db.select().from(toolActionRequests))[0].status).toBe("executed");
+        expect(remote.provider).toHaveBeenCalledTimes(1);
+      });
+
+      it("reconstructs the saved deadline and quarantines only when due", async () => {
+        const pending = await savedClaim(); await startInterruption();
+        expect(coordinator!.nextWakeAt()).toBe(pending.updatedAt.getTime() + 10 * 60_000);
+        await settle(9 * 60_000);
+        expect((await db.select().from(toolActionRequests))[0].status).toBe("executing");
+        await settle(2 * 60_000); await unknown(pending); await quiet();
+        expect(await db.select().from(toolCallEvents).where(eq(toolCallEvents.reasonCode, "approved_action_executed"))).toEqual([]);
+      });
+
+      it.each(["succeeded", "failed", "denied", "timed_out", "rate_limited"] as const)("preserves a saved %s invocation while repairing the request", async status => {
+        const pending = await savedClaim(db, 11 * 60_000);
+        const completedAt = new Date(Date.now() - 5 * 60_000);
+        await db.update(toolInvocations).set({ status, completedAt, resultSummary: { summary: "Saved provider result" },
+          errorCode: status === "succeeded" ? null : "saved_provider_failure" }).where(eq(toolInvocations.id, pending.invocationId));
+        await startInterruption(); await quiet();
+        expect((await db.select().from(toolActionRequests))[0]).toMatchObject({
+          status: status === "succeeded" ? "executed" : "failed", resolvedAt: completedAt });
+        expect((await db.select().from(toolInvocations))[0]).toMatchObject({ status, completedAt,
+          errorCode: status === "succeeded" ? null : "saved_provider_failure", resultSummary: { summary: "Saved provider result" } });
+      });
+
+      it("retains a first claim committed during drain without passive database scans", async () => {
+        await startInterruption(); await quiet(); draining = true;
+        const pending = await savedClaim(); await settle();
+        const reads = vi.spyOn(db, "select");
+        await settle(60 * 60_000); expect(reads).not.toHaveBeenCalled(); reads.mockRestore();
+        draining = false; await settle(); await unknown(pending); await quiet();
+      });
+
+      it.each([false, true])("waits for outer execution commit (rollback %s)", async rollback => {
+        const pending = await request(); await startInterruption(); await quiet();
+        let entered!: () => void, release!: () => void;
+        const ready = new Promise<void>(resolve => { entered = resolve; });
+        const gate = new Promise<void>(resolve => { release = resolve; });
+        const aborted = new Error("fixture rollback");
+        const running = db.transaction(async tx => {
+          await writeToolReviewChange(tx as unknown as typeof db, async nested => {
+            await nested.update(toolActionRequests).set({ status: "executing", updatedAt: new Date() })
+              .where(eq(toolActionRequests.id, pending.id));
+          });
+          entered(); await gate; if (rollback) throw aborted;
+        }).catch(error => { if (error !== aborted) throw error; });
+        await ready;
+        try {
+          await vi.advanceTimersByTimeAsync(11 * 60_000);
+          expect((await db.select().from(toolActionRequests))[0].status).toBe("pending");
+        } finally { release(); await running; }
+        await vi.waitFor(async () => {
+          await vi.advanceTimersByTimeAsync(30_000);
+          if (rollback) expect((await db.select().from(toolActionRequests))[0].status).toBe("pending");
+          else await unknown(pending);
+          expect(idleWorkSnapshot().active).toBe(0);
+        }, { timeout: 5000 });
+        await quiet();
+      });
+
+      it("rolls back both outcome rows on failure and retries after drain", async () => {
+        const pending = await savedClaim(db, 11 * 60_000);
+        await db.execute(sql`create function sleep_review_fail() returns trigger language plpgsql as $$
+          begin raise exception 'interruption fixture failure'; end $$`);
+        await db.execute(sql`create trigger sleep_review_fail before update on tool_invocations
+          for each row when (new.error_code = 'tool_execution_outcome_unknown') execute function sleep_review_fail()`);
+        await startInterruption(); expect(errors.length).toBeGreaterThan(0); errors.length = 0;
+        expect((await db.select().from(toolActionRequests))[0].status).toBe("executing");
+        expect((await db.select().from(toolInvocations))[0].status).toBe("executing");
+        draining = true;
+        await db.execute(sql`drop trigger sleep_review_fail on tool_invocations`);
+        await settle(60 * 60_000);
+        draining = false;
+        await vi.waitFor(async () => {
+          await vi.advanceTimersByTimeAsync(30_000);
+          await unknown(pending);
+        }, { timeout: 5000 });
+        await quiet();
+      });
+
+      it("rechecks a changed claim after selecting a stale candidate", async () => {
+        const pending = await savedClaim(db, 11 * 60_000);
+        const transaction = db.transaction.bind(db);
+        let entered!: () => void, release!: () => void;
+        const ready = new Promise<void>(resolve => { entered = resolve; });
+        const gate = new Promise<void>(resolve => { release = resolve; });
+        const intercepted = vi.spyOn(db, "transaction").mockImplementationOnce(async callback => {
+          entered(); await gate; return transaction(callback);
+        });
+        const sweep = gateway.settleInterruptedActionReviews();
+        await ready;
+        const updatedAt = new Date();
+        try {
+          await writeToolReviewChange(db, tx => tx.update(toolActionRequests).set({ updatedAt })
+            .where(eq(toolActionRequests.id, pending.id)));
+        } finally { release(); }
+        await sweep; intercepted.mockRestore();
+        expect((await db.select().from(toolActionRequests))[0].status).toBe("executing");
+        await startInterruption();
+        expect(coordinator!.nextWakeAt()).toBe(updatedAt.getTime() + 10 * 60_000);
+      });
+
+      it("settles more than one page of interrupted claims", async () => {
+        const pending = await savedClaim(db, 11 * 60_000);
+        await db.insert(toolActionRequests).values(Array.from({ length: 101 }, () => ({ ...pending,
+          id: randomUUID(), interactionId: null, status: "executing" as const })));
+        await startInterruption(); await quiet();
+        const rows = await db.select().from(toolActionRequests);
+        expect(rows).toHaveLength(102); expect(rows.every(row => row.status === "failed")).toBe(true);
+      });
+    });
+
     describe("approved review recovery worker", () => {
       async function startRecovery() {
         coordinator = createDeliveryWorkCoordinator({ owner: db, canRun: () => !draining,
@@ -385,35 +567,6 @@ describeEmbeddedPostgres("tool gateway service", () => {
         await settle(60 * 60_000); expect(reads).not.toHaveBeenCalled(); reads.mockRestore();
         draining = false; await settle(); await executed(pending); await quiet();
       });
-
-      async function testRequest(provider: NonNullable<ToolGatewayServiceOptions["remoteHttpRequest"]>) {
-        await db.insert(companyMemberships).values({ companyId: fixture.company.id, principalType: "user",
-          principalId: "board", status: "active", membershipRole: "owner" });
-        const remote = await createRemoteMcpToolFixture(db, fixture.company.id);
-        await db.update(toolCatalogEntries).set({ isReadOnly: false, riskLevel: "write" })
-          .where(eq(toolCatalogEntries.id, remote.catalogEntry.id));
-        await db.insert(toolPolicies).values({ companyId: fixture.company.id, name: "Review connected writes",
-          policyType: "require_approval", priority: 10, selectors: { connectionId: remote.connection.id } });
-        gateway = createTestToolGatewayService(db, { remoteHttpRequest: provider });
-        const result = await gateway.executeTestCall({ companyId: fixture.company.id, connectionId: remote.connection.id,
-          agentId: fixture.agent.id, userId: "board", toolName: "needs_input", parameters: { value: "reviewed" } });
-        expect(result.decision).toBe("ask_first");
-        const [pending] = await db.select().from(toolActionRequests);
-        return { pending, remote };
-      }
-      function providerFixture() {
-        let release!: () => void, entered!: () => void;
-        const gate = new Promise<void>(resolve => { release = resolve; });
-        const started = new Promise<void>(resolve => { entered = resolve; });
-        const provider = vi.fn(async (_url, init) => {
-          const payload = JSON.parse(String(init.body));
-          expect(payload.method).toBe("tools/call");
-          entered(); await gate;
-          return Response.json({ jsonrpc: "2.0", id: payload.id,
-            result: { content: [{ type: "text", text: "Saved once" }] } });
-        });
-        return { provider, release, started };
-      }
 
       it.each(["foreground", "recovery"] as const)("claims a Test-tab action once when %s wins", async winner => {
         const remoteCall = providerFixture();
