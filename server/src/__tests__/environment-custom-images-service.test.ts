@@ -1,3 +1,4 @@
+import { resolveExternalTestDatabaseUrl } from "./helpers/external-test-database.js";
 import { registerCustomImageCleanupWork } from "../services/custom-image-cleanup-work.js";
 import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordinator.js";
 import { idleWorkSnapshot } from "../services/task-admission.js";
@@ -30,7 +31,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 
-const externalTestDatabase = process.env.PAPERCLIP_CUSTOM_IMAGE_TEST_DATABASE_URL;
+const externalTestDatabase = resolveExternalTestDatabaseUrl("PAPERCLIP_CUSTOM_IMAGE_TEST_DATABASE_URL");
 const embeddedPostgresSupport = externalTestDatabase ? { supported: true, reason: undefined } : await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
@@ -214,7 +215,6 @@ describeEmbeddedPostgres("environmentCustomImageService", () => {
     const errors: unknown[] = [];
 
     beforeEach(async () => {
-      // Open the pool before fake time can advance connection handshakes.
       await Promise.all(Array.from({ length: 6 }, () => db.execute(sql`select pg_sleep(0.01)`)));
       draining = false;
       errors.length = 0;
@@ -304,6 +304,33 @@ describeEmbeddedPostgres("environmentCustomImageService", () => {
       await quiet();
     });
 
+    it("retains a producer commit that arrives during the deadline read", async () => {
+      await start(); const created = await create(); await settle();
+      await coordinator!.stop();
+      let release!: () => void, reading!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const entered = new Promise<void>(resolve => { reading = resolve; });
+      const readDeadline = service.nextSetupCleanupAt;
+      vi.spyOn(service, "nextSetupCleanupAt").mockImplementationOnce(async () => {
+        const stale = await readDeadline();
+        reading(); await gate;
+        return stale;
+      });
+      const starting = start();
+      await entered;
+      const earlier = new Date(Date.now() + 5 * 60_000);
+      try {
+        provider.call.mockResolvedValueOnce({ providerLeaseId: created.session.providerLeaseId,
+          status: "waiting_for_user", expiresAt: earlier.toISOString() } as never);
+        await service.refreshSetupSession({ sessionId: created.session.id });
+      } finally { release(); }
+      await starting; await settle();
+      await vi.waitFor(() => expect(coordinator!.nextWakeAt()).toBe(earlier.getTime()));
+      await settle(5 * 60_000);
+      await vi.waitFor(() => expect(cancellations()).toHaveLength(1));
+      await quiet();
+    });
+
     it("reconstructs a saved expiry after restart", async () => {
       await start(); const created = await create(); await settle();
       await coordinator!.stop();
@@ -324,7 +351,6 @@ describeEmbeddedPostgres("environmentCustomImageService", () => {
         await vi.waitFor(() => expect(errors).toHaveLength(1)); errors.length = 0;
         draining = true;
       }
-      // Let the committed signal reconcile before observing passive drain.
       await settle();
       const reads = vi.spyOn(db, "select");
       await settle(2 * 60 * 60_000);
