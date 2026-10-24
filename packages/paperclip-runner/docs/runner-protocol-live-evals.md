@@ -494,3 +494,7 @@ checksum-verified Grok binary before packaging the portable runtime. Targets
 without the Grok package keep their existing build behavior. This protocol
 workflow uses the explicitly selected API key; subscription credentials are
 not delivered by it.
+
+The controlled Codex profile disables web search. The shared proxy accepts local
+function/custom tool namespaces and still rejects hosted tools, including any
+hidden inside a namespace. These routes do not qualify web-search charges.
