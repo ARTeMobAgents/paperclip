@@ -1,3 +1,4 @@
+import { LiveTranscriptInterests, DISCONNECTED_TRANSCRIPT_STREAM } from "../lib/live-transcript-interests";
 import { resolveAgentAppearance } from "@paperclipai/shared";
 import { getPageVisibility, usePageVisibility } from "../lib/page-visibility";
 import {
@@ -7,6 +8,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import {
@@ -81,6 +83,8 @@ type LiveUpdatesSocketLike = {
 export type CompanyLiveEventHandler = (event: LiveEvent) => void;
 
 interface LiveEventSubscription {
+  companyId?: string | null;
+  transcripts?: LiveTranscriptInterests;
   subscribe: (handler: CompanyLiveEventHandler) => () => void;
 }
 
@@ -124,6 +128,28 @@ export function useCompanyLiveEvent(handler: CompanyLiveEventHandler): void {
       handlerRef.current(event);
     });
   }, [subscription]);
+}
+
+const subscribeNoop = () => () => {};
+const disconnectedSnapshot = () => DISCONNECTED_TRANSCRIPT_STREAM;
+
+/** Install the listener before advertising interest, then catch up after ACK. */
+export function useTranscriptLiveStream(runIds: readonly string[], options: { companyId?: string | null; enabled?: boolean }, handler: CompanyLiveEventHandler) {
+  const subscription = useContext(LiveEventSubscriptionContext);
+  const { visible } = usePageVisibility();
+  useCompanyLiveEvent(event => {
+    if (visible && options.enabled !== false && (options.companyId === undefined || event.companyId === options.companyId)) handler(event);
+  });
+  const key = [...new Set(runIds)].sort().join(",");
+  const active = visible && options.enabled !== false && subscription?.transcripts !== undefined
+    && (options.companyId === undefined || subscription.companyId === options.companyId);
+  const state = useSyncExternalStore(subscription?.transcripts?.subscribe ?? subscribeNoop,
+    subscription?.transcripts?.snapshot ?? disconnectedSnapshot, disconnectedSnapshot);
+  useEffect(() => {
+    if (!active || !subscription?.transcripts) return;
+    return subscription.transcripts.acquire(key ? key.split(",") : []);
+  }, [active, subscription, key]);
+  return active ? state : DISCONNECTED_TRANSCRIPT_STREAM;
 }
 
 function readString(value: unknown): string | null {
@@ -623,7 +649,7 @@ function readRunLiveStatusPatchFromPayload(
     return patch;
   }
 
-  if (eventType === "heartbeat.run.log") {
+  if (eventType === "heartbeat.run.log" || eventType === "heartbeat.run.activity") {
     patch.lastEventAt = readString(payload.ts) ?? eventCreatedAt;
     return patch;
   }
@@ -1799,7 +1825,7 @@ function handleLiveEvent(
       liveStatusPatch,
     );
   }
-  if (event.type === "heartbeat.run.log") {
+  if (event.type === "heartbeat.run.log" || event.type === "heartbeat.run.activity") {
     return;
   }
 
@@ -2000,9 +2026,10 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
       subscribersRef.current.delete(handler);
     };
   }, []);
+  const transcripts = useMemo(() => new LiveTranscriptInterests(), [liveCompanyId, socketAuthKey]);
   const subscriptionValue = useMemo<LiveEventSubscription>(
-    () => ({ subscribe }),
-    [subscribe],
+    () => ({ subscribe, transcripts, companyId: liveCompanyId }),
+    [subscribe, transcripts, liveCompanyId],
   );
 
   // Coalesce the per-event invalidation storm. Optimistic setQueryData writes
@@ -2104,6 +2131,7 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
           return;
         }
         stopPolling();
+        transcripts.open(nextSocket);
         if (reconnectAttempt > 0) {
           gateRef.current.suppressUntil = Date.now() + RECONNECT_SUPPRESS_MS;
         }
@@ -2123,12 +2151,20 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
 
       nextSocket.onmessage = (message) => {
         if (closed || socket !== nextSocket) return;
-        if (!getPageVisibility().visible) return;
         const raw = typeof message.data === "string" ? message.data : "";
         if (!raw) return;
 
         try {
           const parsed = JSON.parse(raw) as LiveEvent;
+          if (transcripts.receive(parsed)) {
+            if ((parsed as { type: string }).type === "live.resync") {
+              // Overflow can also drop lifecycle events; refresh active views,
+              // while transcript consumers catch up after the new interest ACK.
+              void queryClient.invalidateQueries({ type: "active" }, { cancelRefetch: false });
+            }
+            return;
+          }
+          if (!getPageVisibility().visible) return;
           handleLiveEvent(
             coalescingClient,
             liveCompanyId,
@@ -2161,6 +2197,7 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
       nextSocket.onclose = () => {
         if (socket !== nextSocket) return;
         socket = null;
+        transcripts.close();
         if (closed) return;
         startPolling();
         scheduleReconnect();
@@ -2179,6 +2216,7 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
       stopPolling();
       const activeSocket = socket;
       socket = null;
+      transcripts.close();
       closeSocketQuietly(activeSocket, "provider_unmount");
     };
   }, [
@@ -2190,6 +2228,7 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
     pushToast,
     canConnectSocket,
     socketAuthKey,
+    transcripts,
   ]);
 
   return (

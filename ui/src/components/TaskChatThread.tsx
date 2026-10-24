@@ -940,7 +940,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
     hydratedRunIds: hydratedNativeRunIds,
     terminalHydratedRunIds,
     retry: retryNativeEvents,
-  } = useNativeRunTranscripts(nativeRuns);
+  } = useNativeRunTranscripts(nativeRuns, { companyId });
   const logRuns = useMemo(() => runs.filter((run) =>
     run.runtimeMode !== "native" ||
     // Active runs still need the websocket log stream. Only settled native

@@ -1,3 +1,7 @@
+import { TranscriptSequence } from "../../lib/transcript-sequence";
+import { useTranscriptLiveStream } from "../../context/LiveUpdatesProvider";
+import { usePageVisibility } from "../../lib/page-visibility";
+import { liveRunEvent, mergeRunEvents } from "../../lib/live-run-event";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { HeartbeatRunEvent } from "@paperclipai/shared";
 import type { TranscriptEntry } from "@/adapters";
@@ -23,7 +27,8 @@ function isLive(status: string): boolean {
   return status === "queued" || status === "running";
 }
 
-export function useNativeRunTranscripts(runs: readonly NativeRunTranscriptSource[]) {
+export function useNativeRunTranscripts(runs: readonly NativeRunTranscriptSource[], options: { companyId?: string | null; enabled?: boolean } = {}) {
+  const { visible } = usePageVisibility();
   const nativeRunsKey = runs
     .filter((run) => run.runtimeMode === "native")
     .map((run) => `${run.id}:${run.status}`)
@@ -43,8 +48,39 @@ export function useNativeRunTranscripts(runs: readonly NativeRunTranscriptSource
   const retry = useCallback(() => setRetryGeneration((value) => value + 1), []);
   const projectionCacheRef = useRef(new Map<string, { events: HeartbeatRunEvent[]; transcript: TranscriptEntry[] }>());
   const cursorByRunRef = useRef(new Map<string, number>());
+  const sequencesRef = useRef(new Map<string, TranscriptSequence>());
+  const sequence = (id: string) => {
+    let value = sequencesRef.current.get(id);
+    if (!value) { value = new TranscriptSequence(); sequencesRef.current.set(id, value); }
+    return value;
+  };
+  const gapPendingRef = useRef(new Set<string>());
+  const historyReadsRef = useRef(new Map<string, AbortSignal>());
+  const previousCompanyRef = useRef(options.companyId);
+  useEffect(() => {
+    if (previousCompanyRef.current === options.companyId) return;
+    previousCompanyRef.current = options.companyId;
+    setEventsByRun(new Map()); setErrorsByRun(new Map()); setHydratedRunIds(new Set()); setHydratedStatusByRun(new Map());
+    projectionCacheRef.current.clear(); cursorByRunRef.current.clear(); sequencesRef.current.clear(); gapPendingRef.current.clear();
+  }, [options.companyId]);
+  const stream = useTranscriptLiveStream(nativeRuns.filter(run => isLive(run.status)).map(run => run.id), options, event => {
+    const runId = typeof event.payload.runId === "string" ? event.payload.runId : null;
+    if (!runId || !nativeRuns.some(run => run.id === runId)) return;
+    if (event.type === "heartbeat.run.status" && typeof event.payload.status === "string" && !isLive(event.payload.status)) {
+      retry(); return;
+    }
+    const row = liveRunEvent(event);
+    if (!row) return;
+    if (sequence(runId).observe(row.seq) && !gapPendingRef.current.has(runId)) {
+      gapPendingRef.current.add(runId);
+      if (!historyReadsRef.current.has(runId)) retry();
+    }
+    setEventsByRun(previous => new Map(previous).set(runId, mergeRunEvents(previous.get(runId) ?? [], [row])));
+  });
+
 
   useEffect(() => {
+    if (!visible || options.enabled === false) return;
     let cancelled = false;
     const controller = new AbortController();
     const timers = new Set<number>();
@@ -61,10 +97,13 @@ export function useNativeRunTranscripts(runs: readonly NativeRunTranscriptSource
       return next.size === previous.size ? previous : next;
     });
     for (const id of cursorByRunRef.current.keys()) {
-      if (!retainedIds.has(id)) cursorByRunRef.current.delete(id);
+      if (!retainedIds.has(id)) {
+        cursorByRunRef.current.delete(id); sequencesRef.current.delete(id); gapPendingRef.current.delete(id);
+      }
     }
 
     const refreshRun = async (run: NativeRunTranscriptSource) => {
+      historyReadsRef.current.set(run.id, controller.signal);
       let failed = false;
       try {
         let cursor = cursorByRunRef.current.get(run.id) ?? 0;
@@ -87,9 +126,12 @@ export function useNativeRunTranscripts(runs: readonly NativeRunTranscriptSource
         // Commit this run's cursor with its rows. A slow sibling must neither
         // hold its readiness hostage nor stall live polling for this run.
         cursorByRunRef.current.set(run.id, cursor);
+        sequence(run.id).confirm(cursor);
+        failed = sequence(run.id).needsCatchup;
+        if (!failed) gapPendingRef.current.delete(run.id);
         if (incoming.length > 0) setEventsByRun((previous) => {
           const next = new Map(previous);
-          next.set(run.id, [...(previous.get(run.id) ?? []), ...incoming]);
+          next.set(run.id, mergeRunEvents(previous.get(run.id) ?? [], incoming));
           return next;
         });
         setErrorsByRun((previous) => {
@@ -115,9 +157,10 @@ export function useNativeRunTranscripts(runs: readonly NativeRunTranscriptSource
           return next;
         });
       }
+      if (historyReadsRef.current.get(run.id) === controller.signal) historyReadsRef.current.delete(run.id);
       if (cancelled) return;
       setHydratedRunIds((previous) => previous.has(run.id) ? previous : new Set([...previous, run.id]));
-      if (isLive(run.status) || failed) {
+      if ((isLive(run.status) && !stream.healthy) || failed) {
         const timer = window.setTimeout(() => {
           timers.delete(timer);
           void refreshRun(run);
@@ -129,9 +172,10 @@ export function useNativeRunTranscripts(runs: readonly NativeRunTranscriptSource
     return () => {
       cancelled = true;
       controller.abort();
+      for (const [id, signal] of historyReadsRef.current) if (signal === controller.signal) historyReadsRef.current.delete(id);
       for (const timer of timers) window.clearTimeout(timer);
     };
-  }, [nativeRuns, retryGeneration]);
+  }, [nativeRuns, retryGeneration, visible, options.enabled, options.companyId, stream.healthy, stream.epoch]);
 
   const transcriptByRun = useMemo(() => {
     const transcripts = new Map<string, TranscriptEntry[]>();

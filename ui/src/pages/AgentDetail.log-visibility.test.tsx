@@ -3,6 +3,8 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import type { HeartbeatRun } from "@paperclipai/shared";
 import { afterEach, expect, it, vi } from "vitest";
+import { __liveUpdatesTestUtils } from "../context/LiveUpdatesProvider";
+import { LiveTranscriptInterests } from "../lib/live-transcript-interests";
 import { LogViewer } from "./AgentDetail";
 import { LogViewer as ProductionLogViewer } from "./AgentDetail.production";
 
@@ -49,12 +51,12 @@ it.each([LogViewer, ProductionLogViewer])("retains legacy history and reads only
       document.dispatchEvent(new Event("visibilitychange"));
     });
     expect(container.textContent).toContain("retained history");
-    expect(log).toHaveBeenLastCalledWith("run-1", first.length, expect.any(Number));
+    expect(log).toHaveBeenLastCalledWith("run-1", first.length, expect.any(Number), expect.objectContaining({ signal: expect.any(AbortSignal) }));
     await act(async () => complete({ content: second, nextOffset: first.length + second.length }));
     expect(container.textContent).toContain("retained history new output");
     log.mockResolvedValueOnce({ content: first, nextOffset: first.length });
     await act(async () => root.render(<Viewer run={{ ...run, id: "run-2" }} adapterType="codex_local" />));
-    expect(log).toHaveBeenLastCalledWith("run-2", 0, expect.any(Number));
+    expect(log).toHaveBeenLastCalledWith("run-2", 0, expect.any(Number), expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(container.textContent).not.toContain("new output");
   } finally {
     await act(async () => root.unmount());
@@ -62,33 +64,36 @@ it.each([LogViewer, ProductionLogViewer])("retains legacy history and reads only
   }
 });
 
-it.each([LogViewer, ProductionLogViewer])("polls logs when WebSocket construction fails and recovers on retry (%#)", async (Viewer) => {
+it.each([LogViewer, ProductionLogViewer])("uses shared streaming and retains fallback reads until negotiation (%#)", async (Viewer) => {
   vi.useFakeTimers();
   vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
-  vi.stubGlobal("WebSocket", undefined);
+  const socket = vi.fn();
+  vi.stubGlobal("WebSocket", class { constructor() { socket(); } });
   log.mockResolvedValue({ content: "", nextOffset: 0 });
   const run = { id: "run-1", companyId: "company-1", agentId: "agent-1", status: "running", logRef: "log" } as HeartbeatRun;
   const root = createRoot(document.createElement("div"));
-  const sockets: Array<{ onopen: (() => void) | null; close: () => void }> = [];
+  const transcripts = new LiveTranscriptInterests();
+  const messages: Array<{ revision?: number; runIds?: string[] }> = [];
+  const subscription = { companyId: "company-1", transcripts, subscribe: () => () => {} };
+  const { LiveEventSubscriptionContext } = __liveUpdatesTestUtils;
   try {
-    await act(async () => root.render(<Viewer run={run} adapterType="codex_local" />));
+    await act(async () => root.render(<LiveEventSubscriptionContext.Provider value={subscription}><Viewer run={run} adapterType="codex_local" /></LiveEventSubscriptionContext.Provider>));
     const initialReads = log.mock.calls.length;
     await act(async () => vi.advanceTimersByTimeAsync(2000));
     expect(log.mock.calls.length).toBeGreaterThan(initialReads);
     expect(events).toHaveBeenCalled();
-    vi.stubGlobal("WebSocket", class {
-      onopen = null;
-      close = vi.fn();
-      constructor() { sockets.push(this); }
+    await act(async () => {
+      transcripts.open({ send: text => messages.push(JSON.parse(text)) });
+      transcripts.receive({ type: "live.capabilities", version: 1, capabilities: ["run-interests"] });
+      transcripts.receive({ type: "live.subscribed", version: 1, revision: messages.at(-1)?.revision });
     });
-    await act(async () => vi.advanceTimersByTimeAsync(1000));
-    expect(sockets).toHaveLength(1);
-    await act(async () => sockets[0].onopen?.());
+    expect(messages.at(-1)?.runIds).toEqual([run.id]);
     const readsWhenConnected = log.mock.calls.length;
-    await act(async () => vi.advanceTimersByTimeAsync(4000));
+    const eventReadsWhenConnected = events.mock.calls.length;
+    await act(async () => vi.advanceTimersByTimeAsync(90_000));
     expect(log).toHaveBeenCalledTimes(readsWhenConnected);
-  } finally {
-    await act(async () => root.unmount());
-  }
-  expect(sockets[0].close).toHaveBeenCalled();
+    expect(events).toHaveBeenCalledTimes(eventReadsWhenConnected);
+    expect(socket).not.toHaveBeenCalled();
+  } finally { await act(async () => root.unmount()); }
+  expect(messages.at(-1)?.runIds).toEqual([]);
 });
