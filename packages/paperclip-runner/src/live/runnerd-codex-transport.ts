@@ -4775,7 +4775,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
 
   // The prepared launch is the only source of the provider directory. Core
   // records it in session metadata; the session cannot move to another one.
-  #recordPreparedWorkingDirectory(prepared: PreparedRunnerProviderLaunch): void {
+  #recordPreparedWorkingDirectory(prepared: Pick<PreparedRunnerProviderLaunch, "provider">): void {
     const workingDirectory = preparedRunnerLaunchWorkingDirectory(prepared);
     if (workingDirectory === null) {
       throw new Error("runner_prepared_launch_working_directory_unavailable");
@@ -5473,6 +5473,12 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       connectionLeaseTtlMs: 60 * 60 * 1_000,
     });
     this.#core = core;
+    // An adopted process already owns its prepared resources. The checkpoint
+    // preserves that launch descriptor even when the controller filesystem is
+    // gone; calling prepareLaunch again could relocate a surviving session.
+    if (this.options.prepareLaunch && this.options.adoptExistingRunner) {
+      this.#recordPreparedWorkingDirectory({ provider: record(controlPlaneState!.runAttachTemplate.provider) });
+    }
     let environmentPrepared: PreparedRunnerProviderLaunch | undefined;
     if (this.options.prepareLaunch && !this.options.adoptExistingRunner) {
       const preparations = new RunnerLaunchPreparationStore(this.#root);
