@@ -89,7 +89,7 @@ describe("Copilot build-owned installation", () => {
   it("admits the current profile with environment launch preparation", () => {
     expect(QUALIFIED_ACPX_PROFILES.copilot.agentProfileVersion).toBe(59);
     expect(QUALIFIED_ACPX_PROFILES.copilot.qualificationStatus).toBeUndefined();
-    expect(QUALIFIED_ACPX_PROFILES.copilot.commandDigest).toBe("sha256:9d251d85ab3ca6138f4fe4825e0e1d2e0aee301d07a77eede9ba2fb16885fac8");
+    expect(QUALIFIED_ACPX_PROFILES.copilot.commandDigest).toBe("sha256:f9f71233d3f795354c241b70b339b3a0e3c632af3f3c27539f8a1a34870edbe3");
   });
 
   it("preserves v57 while binding the shared Pi setup and launch repairs in v58", () => {

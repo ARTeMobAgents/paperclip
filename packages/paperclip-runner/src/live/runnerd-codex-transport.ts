@@ -5477,7 +5477,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     // preserves that launch descriptor even when the controller filesystem is
     // gone; calling prepareLaunch again could relocate a surviving session.
     if (this.options.prepareLaunch && this.options.adoptExistingRunner) {
-      this.#recordPreparedWorkingDirectory({ provider: record(controlPlaneState!.runAttachTemplate.provider) });
+      this.#recordPreparedWorkingDirectory({ provider: record(record(controlPlaneState!.runAttachTemplate).provider) });
     }
     let environmentPrepared: PreparedRunnerProviderLaunch | undefined;
     if (this.options.prepareLaunch && !this.options.adoptExistingRunner) {
