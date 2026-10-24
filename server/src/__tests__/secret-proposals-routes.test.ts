@@ -1,3 +1,4 @@
+import { resolveExternalTestDatabaseUrl } from "./helpers/external-test-database.js";
 import { registerSecretProposalExpiryWork } from "../services/secret-proposal-expiry-work.js";
 import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordinator.js";
 import { idleWorkSnapshot } from "../services/task-admission.js";
@@ -41,7 +42,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 
-const externalTestDatabase = process.env.PAPERCLIP_SECRET_PROPOSAL_TEST_DATABASE_URL;
+const externalTestDatabase = resolveExternalTestDatabaseUrl("PAPERCLIP_SECRET_PROPOSAL_TEST_DATABASE_URL");
 const embeddedPostgresSupport = externalTestDatabase ? { supported: true } : await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
@@ -312,7 +313,28 @@ describeEmbeddedPostgres("secret proposal routes", () => {
       } finally { release(); }
       await writing; await settle();
       expect(await proposals.nextExpiryAt()).toEqual(rollback ? null : expect.any(Number));
-      expect(coordinator!.nextWakeAt()).toBe(await proposals.nextExpiryAt());
+      if (rollback) await quiet();
+      else expect(coordinator!.nextWakeAt()).toBe(await proposals.nextExpiryAt());
+    });
+
+    it("retains a proposal committed while an empty deadline read is finishing", async () => {
+      let release!: () => void, reading!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const entered = new Promise<void>(resolve => { reading = resolve; });
+      const readDeadline = proposals.nextExpiryAt;
+      vi.spyOn(proposals, "nextExpiryAt").mockImplementationOnce(async () => {
+        const stale = await readDeadline();
+        reading(); await gate;
+        return stale;
+      });
+      const starting = start();
+      await entered;
+      let secret!: Awaited<ReturnType<typeof create>>;
+      try { secret = await create(); } finally { release(); }
+      await starting; await settle();
+      expect(coordinator!.nextWakeAt()).toBe(secret.expiresAt.getTime());
+      await proposals.transition(fixture.companyId, secret.id, "withdrawn", { proposerAgentId: fixture.agentId });
+      await quiet();
     });
 
     it("reconstructs a deadline after restart and disarms when the proposer withdraws", async () => {
