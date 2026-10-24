@@ -4,7 +4,7 @@ import { PassThrough } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { agents, companies, createDb, environmentLeases, environments, heartbeatRuns, plugins, projects } from "@paperclipai/db";
+import { agents, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, environmentLeases, environments, heartbeatRuns, plugins, projects } from "@paperclipai/db";
 import { definePlugin } from "../../../packages/plugins/sdk/src/define-plugin.js";
 import { startWorkerRpcHost } from "../../../packages/plugins/sdk/src/worker-rpc-host.js";
 import { createRequest, parseMessage, serializeMessage, isJsonRpcSuccessResponse, isJsonRpcErrorResponse } from "../../../packages/plugins/sdk/src/protocol.js";
@@ -61,7 +61,7 @@ databaseSuite("Core plugin Runner task lifecycle", () => {
   beforeAll(async () => {
     const started = await startEmbeddedPostgresTestDatabase("plugin-runner-task");
     stopDb = started.stop; db = createDb(started.connectionString);
-  });
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
   afterAll(async () => { await stopDb?.(); });
 
   it("uses an acquired lease through SDK RPC, native dispatch, connection, stop proof and release", async () => {
@@ -273,7 +273,7 @@ databaseSuite("Core plugin Runner task lifecycle", () => {
       expect(cleaned).toMatchObject({ status: "expired", cleanupStatus: "success", environmentId: null,
         metadata: { runnerTaskDispatched: false, remoteExecutionTermination: { state: "stopped" } } });
     } finally { executionStopped = true; handle.child.kill(); await handle.completion.catch(() => {}); harness.stop(); }
-  });
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   it.each([false, true])("replaces a same-run task only after the provider confirms termination (%s)", async stopped => {
     const companyId = randomUUID(), agentId = randomUUID(), runId = randomUUID(), pluginId = randomUUID(), environmentId = randomUUID(), oldLeaseId = randomUUID();
