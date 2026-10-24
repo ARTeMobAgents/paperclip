@@ -57,6 +57,29 @@ PRP v2 command vocabulary. Incoming wire commands still undergo the negotiated
 protocol validation before execution; ordinary persisted v1 summaries remain
 compatible.
 
+## External controller checkpoints
+
+The optional controller persistence callback stores recovery control state, not
+an output transcript. Text deltas do not trigger callbacks; usage updates are
+coalesced into the next control checkpoint. Authentication, command intents and
+outcomes, semantic inputs, lifecycle and result events retain commit barriers.
+Priority-zero and unknown event kinds are never treated as disposable output.
+
+Supporting runners advertise `recoveryCursorVersion: 1` in `auth_hello`. The core
+includes that capability and `recoveryAckedSourceSeq` in both authentication
+proofs. The runner verifies the cursor equals its persisted acknowledgement.
+After authentication and owner admission, a replacement core can reconcile that
+cursor with its sparse checkpoint. It only skips already-acknowledged history;
+new delivery remains contiguous. Unacknowledged events use the existing outbox.
+A peer without this capability cannot attach to a sparse external checkpoint.
+New runners can still authenticate to older controllers that use full journals.
+
+There is no per-output external checkpoint timer or remote-controller cache
+fsync. Local-only controllers retain their full file journal. Existing application
+callbacks, the bounded runner outbox, and backpressure remain. Losing the
+controller before acknowledged display output reaches its application log can
+leave a display tail gap; this must not trigger provider or tool reexecution.
+
 ## Connection and authentication
 
 The connection starts in this order:
