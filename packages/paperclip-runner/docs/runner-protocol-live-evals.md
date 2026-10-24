@@ -510,3 +510,7 @@ Campaign reports verify the retained request binding and the digest of every
 request receipt before reducing a cell's allocation. Missing admission, request,
 or receipt evidence preserves known ledger charges and holds the rest of the
 full allocation.
+
+On cancellation, the controller keeps the scheduled process-group SIGKILL until
+any remaining owned descendants receive it, even if the CLI exits first. A
+forced stop still leaves cleanup unverified and retains the full allocation.

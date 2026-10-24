@@ -11,9 +11,17 @@ import { summarizeControlledCampaign } from './report.mjs';
 const childScript = options => `
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
+import {spawn} from 'node:child_process';
+import {once} from 'node:events';
 import {readFile,writeFile} from 'node:fs/promises';
 const args=new Map();for(let i=2;i<process.argv.length;i+=2)args.set(process.argv[i],process.argv[i+1]);
 const request=JSON.parse(await readFile(args.get('--request'),'utf8'));
+if(${Boolean(options.resistantDescendant)}) {
+ const descendant=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});process.stdout.write('ready');setInterval(()=>{},1000)"],{stdio:['ignore','pipe','ignore']});
+ await once(descendant.stdout,'data');
+ await writeFile(request.session.workingDirectory+'/descendant.pid',String(descendant.pid));
+}
+
 const descriptorRaw=await readFile(args.get('--gateway-config'),'utf8'),descriptor=JSON.parse(descriptorRaw);
 for(const key of ['OPENAI_API_KEY','ANTHROPIC_API_KEY','BRAINTRUST_API_KEY','GH_TOKEN','NODE_OPTIONS','PYTHONPATH'])assert.equal(process.env[key],undefined);
 const statuses=[];
@@ -249,4 +257,23 @@ test('staged CLI relative imports survive a symlinked evidence directory', async
   const result = await f.run();
   assert.equal(result.code, 0);
   assert.equal((await summarizeControlledCampaign(f.manifest)).incompleteAttempts, 0);
+});
+
+test('cancellation still kills an owned resistant descendant after the CLI exits', async t => {
+  const f = await fixture(t, { requests: 1, waitForever: true, resistantDescendant: true });
+  f.manifest.attempts[0].timeoutMs = 15000; await f.save();
+  const abort = new AbortController(); let ready;
+  const started = new Promise(resolve => { ready = resolve; });
+  const running = f.run(0, async () => { ready(); return success(); }, abort.signal);
+  await started;
+  const pid = Number(await readFile(join(f.requests[0].request.session.workingDirectory, 'descendant.pid'), 'utf8'));
+  t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+  abort.abort();
+  const result = await running;
+  assert.equal(result.report.child.stopped, 'controller_cancelled');
+  const absent = () => { try { process.kill(pid, 0); return false; } catch (error) { return error.code === 'ESRCH'; } };
+  for (let retry = 0; retry < 100 && !absent(); retry++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(absent(), true);
+  assert.equal(result.report.cleanupVerified, false);
+  assert.equal((await summarizeControlledCampaign(f.manifest)).committedUsd, '0.014000000');
 });

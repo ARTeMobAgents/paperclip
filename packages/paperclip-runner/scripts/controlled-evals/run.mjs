@@ -20,14 +20,16 @@ async function runChild(input) {
   const child = spawn(process.execPath, ['--import', input.loader, input.cli, '--request', input.requestPath, '--output', input.artifactPath, '--gateway-config', input.descriptorPath], {
     cwd: input.cwd, env: input.environment, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
   });
-  let stopped = null, force;
+  let stopped = null, force, escalation;
   const output = { stdout: [], stderr: [] }, sizes = { stdout: 0, stderr: 0 };
   const stop = reason => {
     if (stopped) return;
     stopped = reason;
     void input.closeGateway().catch(() => {});
     try { process.kill(-child.pid, 'SIGTERM'); } catch {}
-    force = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, 5000);
+    escalation = new Promise(resolve => {
+      force = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} finally { resolve(); } }, 5000);
+    });
   };
   for (const stream of ['stdout', 'stderr']) child[stream].on('data', bytes => {
     const available = Math.max(0, 1_048_576 - sizes[stream]);
@@ -40,6 +42,11 @@ async function runChild(input) {
   if (input.signal?.aborted) onAbort();
   try {
     const [code, signal] = await once(child, 'exit');
+    if (stopped) {
+      let groupPresent = true;
+      try { process.kill(-child.pid, 0); } catch (error) { if (error.code === 'ESRCH') groupPresent = false; }
+      if (groupPresent) await escalation;
+    }
     return { code, signal, pid: child.pid, stopped, stdout: Buffer.concat(output.stdout).toString(), stderr: Buffer.concat(output.stderr).toString() };
   } finally {
     clearTimeout(timeout); clearTimeout(force); input.signal?.removeEventListener('abort', onAbort);
