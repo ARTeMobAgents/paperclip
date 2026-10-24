@@ -278,6 +278,7 @@ describeEmbeddedPostgres("tool gateway service", () => {
       vi.useRealTimers(); vi.restoreAllMocks();
       await db.execute(sql`drop trigger if exists sleep_review_fail on tool_invocations`);
       await db.execute(sql`drop function if exists sleep_review_fail()`);
+      await db.execute(sql`drop sequence if exists sleep_review_failure_attempt`);
       expect(errors).toEqual([]);
     }
     async function start() {
@@ -614,12 +615,18 @@ describeEmbeddedPostgres("tool gateway service", () => {
         await quiet(); expect(remoteCall.provider).not.toHaveBeenCalled();
       });
 
-      it("does not replay a Test-tab call when persisting its external result fails", async () => {
+      it.each(["always", "once"])("does not replay a Test-tab call when persisting its external result fails %s", async mode => {
         const remoteCall = providerFixture(); remoteCall.release();
         const { pending } = await testRequest(remoteCall.provider);
         await approve(pending);
-        await db.execute(sql`create function sleep_review_fail() returns trigger language plpgsql as $$
-          begin raise exception 'approval result fixture failure'; end $$`);
+        await db.execute(sql`create sequence sleep_review_failure_attempt`);
+        await db.execute(sql.raw(`create function sleep_review_fail() returns trigger language plpgsql as $$
+          begin
+            if ${mode === "always" ? "true" : "nextval('sleep_review_failure_attempt') = 1"} then
+              raise exception 'approval result fixture failure';
+            end if;
+            return new;
+          end $$`));
         await db.execute(sql`create trigger sleep_review_fail before update on tool_action_requests
           for each row when (new.status in ('executed', 'failed')) execute function sleep_review_fail()`);
         try {
