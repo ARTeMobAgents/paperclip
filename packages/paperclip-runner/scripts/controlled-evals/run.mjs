@@ -57,6 +57,7 @@ export async function runControlledEval({ manifestPath, requestPath, outputPath,
     const suffix = relative(resolve(request.session.workingDirectory), resolve(manifest.outputDirectory));
     if (!suffix || suffix !== '..' && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix)) throw new Error('Controller evidence must be outside the disposable workspace');
   }
+  const originalCliUrl = pathToFileURL(await realpath(manifest.runnerCli.path)).href;
   const verified = {};
   for (const name of ['runnerCli', 'runnerPackage', 'runnerd']) {
     const artifact = manifest[name], bytes = await readFile(artifact.path);
@@ -86,7 +87,7 @@ export async function runControlledEval({ manifestPath, requestPath, outputPath,
   const stagedCli = join(executables, 'entry.mjs'), stagedRunnerd = join(executables, 'runnerd'), loader = join(executables, 'imports.mjs');
   await writeFile(stagedCli, verified.runnerCli, { flag: 'wx', mode: 0o400 });
   await writeFile(stagedRunnerd, verified.runnerd, { flag: 'wx', mode: 0o500 });
-  const stagedUrl = JSON.stringify(pathToFileURL(stagedCli).href), originalUrl = JSON.stringify(pathToFileURL(manifest.runnerCli.path).href);
+  const stagedUrl = JSON.stringify(pathToFileURL(await realpath(stagedCli)).href), originalUrl = JSON.stringify(originalCliUrl);
   await writeFile(loader, `import { registerHooks } from 'node:module';
 registerHooks({ resolve(specifier, context, nextResolve) {
   return nextResolve(specifier, context.parentURL === ${stagedUrl} ? { ...context, parentURL: ${originalUrl} } : context);

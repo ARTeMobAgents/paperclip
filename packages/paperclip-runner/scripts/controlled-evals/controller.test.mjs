@@ -237,3 +237,16 @@ for (const replaced of ['runnerCli', 'runnerd']) test(`launches verified bytes a
   assert.equal((await summarizeControlledCampaign(f.manifest)).incompleteAttempts, 0);
   await assert.rejects(readdir(join(attemptDirectory(f.manifest, 'attempt-0'), 'executables')), { code: 'ENOENT' });
 });
+
+test('staged CLI relative imports survive a symlinked evidence directory', async t => {
+  const f = await fixture(t, { requests: 1 });
+  await writeFile(join(f.root, 'helper.mjs'), "export const marker = 'trusted sibling';\n");
+  await writeFile(f.manifest.runnerCli.path, "import { marker } from './helper.mjs';\n" + childScript({ requests: 1 }) + "\nassert.equal(marker, 'trusted sibling');\n");
+  f.manifest.runnerCli.sha256 = sha256(await readFile(f.manifest.runnerCli.path));
+  const alias = join(f.root, 'evidence-alias');
+  await mkdir(join(f.root, 'evidence-real')); await symlink(join(f.root, 'evidence-real'), alias);
+  f.manifest.outputDirectory = join(alias, 'controller'); await f.save();
+  const result = await f.run();
+  assert.equal(result.code, 0);
+  assert.equal((await summarizeControlledCampaign(f.manifest)).incompleteAttempts, 0);
+});
