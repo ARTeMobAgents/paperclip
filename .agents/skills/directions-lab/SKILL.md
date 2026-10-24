@@ -1,17 +1,6 @@
 ---
 name: directions-lab
-description: >
-  Scaffold and run a "directions lab" for a UI feature: a standalone page that
-  shows what ships today (Today, the real components on fixtures) next to 2–3
-  numbered design directions, with a surfaces row only when the feature appears
-  in more than one place, the dark/light and animation toggles, and the V1 MVP
-  hover motion (300ms cubic-bezier(0.3, 0, 0.1, 1), 6px rise, 5° fan) in every
-  direction, registered as a catalogued entry in the design-proposals Storybook.
-  Use this whenever Tonio asks for a directions page or directions lab, wants to
-  explore N directions or options for a feature next to production, wants to
-  compare directions with the same toggles as the artifact directions lab, or
-  wants to add, capture or graduate a direction in an existing lab, even when he
-  does not say "lab".
+description: Scaffold a directions lab that shows shipped UI (Today) beside 2-3 design directions, with surface tabs, theme and animation toggles and the V1 MVP hover motion, registered in design-proposals Storybook. Use for a directions page or lab, or to explore design directions next to production.
 ---
 
 # Directions lab
