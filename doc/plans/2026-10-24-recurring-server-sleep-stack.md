@@ -18,7 +18,7 @@ Do not mark an item done from a timer removal or a green check alone.
 | 04 | Decision retention and notifications | Retention deadlines and notification delivery are separate reasons | Pending |
 | 05 | Decision expiry and interrupted effects | Expiry, effect recovery, continuation recovery | Pending |
 | 06 | Tool connection health | Configuration/use activation and defined proactive health deadlines | Pending |
-| 07 | Secret proposals, tool reviews, gateway tokens | Separate expiry/scrub/recovery owners | Secret proposals: [#17446](https://github.com/paperclipai/paperclip/pull/17446), checks passed at `d41590ac0e`; gateway credentials: [#17450](https://github.com/paperclipai/paperclip/pull/17450), Greptile 5/5 at `c5c53fc43f`, fresh CI running; pending tool-review expiry: [#17453](https://github.com/paperclipai/paperclip/pull/17453), local verification passed and CI/review running; other review duties pending |
+| 07 | Secret proposals, tool reviews, gateway tokens | Separate expiry/scrub/recovery owners | Secret proposals: [#17446](https://github.com/paperclipai/paperclip/pull/17446), checks passed at `d41590ac0e`; gateway credentials: [#17450](https://github.com/paperclipai/paperclip/pull/17450), all checks passed, Greptile 5/5 at `c5c53fc43f`; pending tool-review expiry: [#17453](https://github.com/paperclipai/paperclip/pull/17453), all checks passed, Greptile 5/5 at `ce6a260a83`; approved recovery: [#17454](https://github.com/paperclipai/paperclip/pull/17454), review repair pushed; other review duties pending |
 | 08 | GitHub connection events and continuity | Event discovery/replay and credential continuity separately | Pending |
 | 09 | Merged-PR confirmations | Candidate writes, webhook activation where supported, outstanding-candidate fallback | Pending |
 | 10 | External-object refresh | Configuration changes, refresh deadlines, source events | Pending |
@@ -190,3 +190,11 @@ tests, workspace typecheck and build. Fresh CI/review remains required.
 reproduction for #17453 was missing the fake-provider binary: its durable state
 showed ENOENT hidden by close failure. After building the fixture all seven
 cases pass; one CI retry is running.
+
+#17453 now has passing checks after its single Runner retry. #17454's initial
+server shard found an old expected approved state for a completed Test-tab call;
+the updated regression requires executed and one provider call. All 469
+tool-access service tests pass after enabling the existing external database
+path independently of embedded support. Its initial browser shard failed during
+unrelated plan-task fixture company deletion with a concurrent activity-log FK
+violation. Inspect fresh-head CI before deciding whether that needs a repair.

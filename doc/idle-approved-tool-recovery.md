@@ -88,3 +88,9 @@ pre-dispatch validation, and outcome persistence now have separate error
 boundaries. Both persistent and one-shot result-write failures retain the claim
 for quarantine without repeating the call. The complete 123-test selection and
 92 gateway acceptance cases pass after the repair, as do typecheck and build.
+
+The existing tool-access service regression now expects a completed Test-tab
+request to be executed and verifies exactly one provider call before asking for
+a new approval. Its full 469-test suite passes. The initial local command skipped
+its database cases; the suite now honors its supplied disposable database through
+the standard test-database guard independently of embedded Postgres support.
