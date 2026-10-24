@@ -158,6 +158,17 @@ closed issue's worktree only when its remote can reproduce it exactly. With
 `PAPERCLIP_GIT_RESTORE_POINTS_ENABLED=true`, it can also remove a worktree that has
 unpushed commits, uncommitted or untracked files, or history-only commits, once its issue
 tree has been closed for `PAPERCLIP_GIT_RESTORE_POINT_TERMINAL_DELAY_DAYS` (default `3`).
+For this, only the issues in the tree that use the workspace count: the source issue, and
+each descendant that is bound to it (`execution_workspace_id`, which is how a child that
+inherits the parent's workspace with `reuse_existing` is recorded) or that selects it as
+its current or pending existing workspace. The delay runs from the latest close time among
+those issues. A closed issue's worktree can therefore be removed while descendants that
+work in their own workspaces stay open. Any issue still bound to the workspace, and any
+live run, finalization, lease, recovery action or runtime service of an issue in the tree
+or of the workspace, still keeps it. If an open descendant later binds to the removed
+workspace, its next run or a comment reopens it from the restore point, as below. The
+workspace reaper does not compact or archive such a worktree by its normal rules while
+descendants are open; only expiration removes it.
 It also removes the worktree of an issue tree that is still open once nothing has
 touched it for `PAPERCLIP_GIT_RESTORE_POINT_IDLE_DAYS` (default `7`, `0` turns this off):
 no issue in the tree or bound to the workspace was updated and no run for those issues or
