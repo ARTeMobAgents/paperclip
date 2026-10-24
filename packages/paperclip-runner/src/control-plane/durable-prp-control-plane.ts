@@ -282,6 +282,13 @@ export interface DurablePrpControlPlaneOptions {
 }
 
 export interface DurablePrpCheckpoint {
+  /** Read-only protocol evidence. Does not grant attachment or execution authority. */
+  readonly recoveryEvidence: {
+    readonly runnerInstanceId: string;
+    readonly normalizedSessionId: string;
+    readonly authenticatedConnectionCount: number;
+    readonly highestRecordedSourceSeq: number;
+  };
   readonly runnerVersion: string;
   readonly runnerDigest: string;
   readonly runId: string;
@@ -344,6 +351,9 @@ function captureCheckpoint(state: StoredCoreState, runnerVersion: string, runner
   const maintenance = new Set(["runner.drain", "runner.suspend", "session.snapshot", "session.close"]);
   return {
     runnerVersion, runnerDigest, runId, records, changedRecords, removedRecords, reset,
+    recoveryEvidence: { runnerInstanceId: state.identity.runnerInstanceId, normalizedSessionId: state.identity.normalizedSessionId,
+      authenticatedConnectionCount: state.connectionCount,
+      highestRecordedSourceSeq: state.committedEvents.reduce((highest, event) => Math.max(highest, event.sourceSeq), state.ackedSourceSeq) },
     predecessor: state.identity.runId === runId ? null
       : { runId: state.identity.runId, normalizedSessionId: state.identity.normalizedSessionId },
     workCommandIds: commands.filter(command => !maintenance.has(command.type)).map(command => command.commandId),

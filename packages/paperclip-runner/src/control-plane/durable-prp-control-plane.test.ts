@@ -158,6 +158,9 @@ it("streams output without checkpoint writes and recovers its authenticated curs
     expect(snapshots).toHaveLength(before);
     expect(JSON.parse(readFileSync(core.store.path, "utf8")).ackedSourceSeq).toBe(0);
     const saved = snapshots.at(-1)!;
+    expect(saved.recoveryEvidence).toEqual({ runnerInstanceId: identity.runnerInstanceId,
+      normalizedSessionId: identity.normalizedSessionId, authenticatedConnectionCount: 1, highestRecordedSourceSeq: 0 });
+    expect(decodeDurablePrpCheckpoint(saved.records).recoveryEvidence).toEqual(saved.recoveryEvidence);
     expect(JSON.parse(saved.records.get("cursor")!).ackedSourceSeq).toBe(0);
     expect([...saved.records.keys()].filter(key => key.startsWith("event:"))).toEqual([]);
     const token = client.leaseToken!;
@@ -172,6 +175,7 @@ it("streams output without checkpoint writes and recovers its authenticated curs
     const replacement = (await authenticate(restored, token, identity, expectedRunnerDigest, undefined, false, 1, 64))!;
     expect(replacement.welcome.payload).toMatchObject({ ackedSourceSeq: 64 });
     expect(restored.recoveredSourceSeq).toBe(64);
+    expect(snapshots.at(-1)!.recoveryEvidence).toMatchObject({ authenticatedConnectionCount: 2, highestRecordedSourceSeq: 64 });
     sendSecure(replacement, ordinaryOutput(65));
     expect(await receiveSecure(replacement)).toMatchObject({ kind: "ack", payload: { ackedSourceSeq: 65 } });
     // Commands remain an immediate durable barrier, without copying text.

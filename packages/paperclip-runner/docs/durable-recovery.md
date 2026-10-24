@@ -470,3 +470,5 @@ Regenerate the checked fault matrix and every exact per-fault trace with:
 ```sh
 # Recorded evidence generation is deferred from this release.
 ```
+
+Checkpoint decoding also exposes read-only recovery evidence: the admitted runner/session identity, authenticated connection count, and highest recorded source sequence. This projection grants no authority and adds no checkpoint writes. Qualification compares it across controller replacement; a replayed canonical event by itself does not prove that a replacement controller has authenticated a runner.
