@@ -74,15 +74,16 @@ const MAX_CONSECUTIVE_RUN_READ_FAILURES = 5;
 
 // A run in one of these statuses can never act for a wakeup, so it can only
 // answer one that created it. See `canAnswerWakeup`.
-const TERMINAL_WAKEUP_FAILURE_STATUSES = new Set(["cancelled", "failed"]);
+const TERMINAL_WAKEUP_FAILURE_STATUSES = new Set(["cancelled", "failed", "timed_out", "interrupted"]);
 
 /**
  * Whether `run` may answer the wakeup posted at `invokedAtMs`.
  *
  * A live run always may: it is the agent's current turn, even when an earlier
- * wakeup started it. A cancelled/failed run may only when this wakeup created
- * it (`createdAt >= invokedAtMs`) — then it is the wakeup's own run and the
- * caller must see its real failure. A terminal run created before the wakeup
+ * wakeup started it. A terminal failure run (cancelled, failed, timed_out or
+ * interrupted) may only when this wakeup created it (`createdAt >= invokedAtMs`)
+ * — then it is the wakeup's own run and the caller must see its real failure.
+ * A terminal run created before the wakeup
  * is a predecessor (the previous stage's run, or an assignment run the server
  * already cancelled as `issue_assignee_changed`). Returning it makes
  * `waitForFixtureRun` assert on a run this wakeup never produced, so the wait
@@ -919,26 +920,36 @@ test.describe("invokeHeartbeat run selection", () => {
     await expect(invokeHeartbeat(board, agentId, issueId)).resolves.toBe("run-cancelled-now");
   });
 
-  test("does not return a cancelled predecessor named by the issue lock", async () => {
-    test.setTimeout(10_800);
-    const board = fakeBoard({
-      issueLock: () => ({ checkoutRunId: "run-cancelled", executionRunId: null }),
-      list: () => [fakeRun("run-cancelled", "cancelled", predecessorCreatedAtMs)],
-    });
+  for (const status of ["cancelled", "failed", "timed_out", "interrupted"]) {
+    test(`does not return a ${status} predecessor named by the issue lock`, async () => {
+      test.setTimeout(10_800);
+      const board = fakeBoard({
+        issueLock: () => ({ checkoutRunId: "run-predecessor", executionRunId: null }),
+        list: () => [fakeRun("run-predecessor", status, predecessorCreatedAtMs)],
+      });
 
-    await expect(invokeHeartbeat(board, agentId, issueId)).rejects.toThrow(
-      /No verified heartbeat run became available/,
-    );
-  });
+      await expect(invokeHeartbeat(board, agentId, issueId)).rejects.toThrow(
+        /No verified heartbeat run became available/,
+      );
+    });
+  }
 
   test("fails instead of returning a cancelled predecessor when no run appears", async () => {
-    test.setTimeout(3_000);
+    // Leave a positive polling budget: with a timeout this small, the helper
+    // would skip the loop and never read the predecessor, so the test could
+    // not tell predecessor filtering from an immediate budget failure.
+    test.setTimeout(12_500);
     const board = fakeBoard({
       list: () => [fakeRun("run-cancelled", "cancelled", predecessorCreatedAtMs)],
     });
 
-    await expect(invokeHeartbeat(board, agentId, issueId)).rejects.toThrow(
-      /No verified heartbeat run became available/,
-    );
+    let message = "";
+    try {
+      await invokeHeartbeat(board, agentId, issueId);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain("No verified heartbeat run became available");
+    expect(message).toContain("Ignored terminal predecessor run: run-cancelled");
   });
 });
