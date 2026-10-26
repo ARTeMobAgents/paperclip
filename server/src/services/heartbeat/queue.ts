@@ -2140,7 +2140,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
   async function deferWakeForProviderQuotaHold(input: {
     agent: typeof agents.$inferSelect;
     hold: ProviderQuotaHold;
-    source: WakeupOptions["source"];
+    source: string;
     triggerDetail: WakeupOptions["triggerDetail"];
     reason: string | null;
     payload: Record<string, unknown> | null;
