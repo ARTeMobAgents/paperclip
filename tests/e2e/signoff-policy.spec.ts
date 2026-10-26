@@ -72,28 +72,36 @@ const WAKEUP_WAIT_RESERVE_MS = 10_000;
 const WAKEUP_POLL_INTERVAL_MS = 100;
 const MAX_CONSECUTIVE_RUN_READ_FAILURES = 5;
 
-// A run in one of these statuses can never act for a wakeup, so it can only
-// answer one that created it. See `canAnswerWakeup`.
-const TERMINAL_WAKEUP_FAILURE_STATUSES = new Set(["cancelled", "failed", "timed_out", "interrupted"]);
+// A run in one of these statuses is terminal: it cannot act for a wakeup, so
+// it can only answer the wakeup that created it. See `canAnswerWakeup`.
+// `succeeded` is included: an older success is a predecessor too, and returning
+// it would make `waitForFixtureRun` accept a run this wakeup never produced.
+const TERMINAL_WAKEUP_STATUSES = new Set([
+  "succeeded",
+  "cancelled",
+  "failed",
+  "timed_out",
+  "interrupted",
+]);
 
 /**
  * Whether `run` may answer the wakeup posted at `invokedAtMs`.
  *
  * A live run always may: it is the agent's current turn, even when an earlier
- * wakeup started it. A terminal failure run (cancelled, failed, timed_out or
+ * wakeup started it. A terminal run (succeeded, cancelled, failed, timed_out or
  * interrupted) may only when this wakeup created it (`createdAt >= invokedAtMs`)
- * — then it is the wakeup's own run and the caller must see its real failure.
- * A terminal run created before the wakeup
- * is a predecessor (the previous stage's run, or an assignment run the server
- * already cancelled as `issue_assignee_changed`). Returning it makes
- * `waitForFixtureRun` assert on a run this wakeup never produced, so the wait
- * keeps polling for the run the server still owes it instead (ART-193).
+ * — then it is the wakeup's own run and the caller must see its real outcome.
+ * A terminal run created before the wakeup is a predecessor (the previous
+ * stage's run, or an assignment run the server already cancelled as
+ * `issue_assignee_changed`). Returning it makes `waitForFixtureRun` assert on
+ * — or worse, accept as success — a run this wakeup never produced, so the
+ * wait keeps polling for the run the server still owes it instead (ART-193).
  */
 function canAnswerWakeup(
   run: { status: string | null; createdAtMs: number | null },
   invokedAtMs: number,
 ): boolean {
-  if (run.status === null || !TERMINAL_WAKEUP_FAILURE_STATUSES.has(run.status)) return true;
+  if (run.status === null || !TERMINAL_WAKEUP_STATUSES.has(run.status)) return true;
   return run.createdAtMs !== null && run.createdAtMs >= invokedAtMs;
 }
 
@@ -894,22 +902,24 @@ test.describe("invokeHeartbeat run selection", () => {
     } as unknown as APIRequestContext;
   }
 
-  test("returns the accepted wakeup run instead of a cancelled predecessor", async () => {
-    test.setTimeout(12_000);
-    let polls = 0;
-    const board = fakeBoard({
-      list: () => {
-        polls += 1;
-        const predecessor = fakeRun("run-cancelled", "cancelled", predecessorCreatedAtMs);
-        // The promoted run appears only once the deferred lock is released.
-        return polls === 1
-          ? [predecessor]
-          : [fakeRun("run-accepted", "queued", Date.now()), predecessor];
-      },
-    });
+  for (const status of ["cancelled", "succeeded"]) {
+    test(`returns the accepted wakeup run instead of a ${status} predecessor`, async () => {
+      test.setTimeout(12_000);
+      let polls = 0;
+      const board = fakeBoard({
+        list: () => {
+          polls += 1;
+          const predecessor = fakeRun(`run-${status}`, status, predecessorCreatedAtMs);
+          // The promoted run appears only once the deferred lock is released.
+          return polls === 1
+            ? [predecessor]
+            : [fakeRun("run-accepted", "queued", Date.now()), predecessor];
+        },
+      });
 
-    await expect(invokeHeartbeat(board, agentId, issueId)).resolves.toBe("run-accepted");
-  });
+      await expect(invokeHeartbeat(board, agentId, issueId)).resolves.toBe("run-accepted");
+    });
+  }
 
   test("returns a run this wakeup created even when it already ended cancelled", async () => {
     test.setTimeout(12_000);
@@ -920,7 +930,16 @@ test.describe("invokeHeartbeat run selection", () => {
     await expect(invokeHeartbeat(board, agentId, issueId)).resolves.toBe("run-cancelled-now");
   });
 
-  for (const status of ["cancelled", "failed", "timed_out", "interrupted"]) {
+  test("returns a succeeded run this wakeup created", async () => {
+    test.setTimeout(12_000);
+    const board = fakeBoard({
+      list: () => [fakeRun("run-succeeded-now", "succeeded", Date.now())],
+    });
+
+    await expect(invokeHeartbeat(board, agentId, issueId)).resolves.toBe("run-succeeded-now");
+  });
+
+  for (const status of ["succeeded", "cancelled", "failed", "timed_out", "interrupted"]) {
     test(`does not return a ${status} predecessor named by the issue lock`, async () => {
       test.setTimeout(10_800);
       const board = fakeBoard({
@@ -951,5 +970,24 @@ test.describe("invokeHeartbeat run selection", () => {
     }
     expect(message).toContain("No verified heartbeat run became available");
     expect(message).toContain("Ignored terminal predecessor run: run-cancelled");
+  });
+
+  test("fails instead of returning an older succeeded run from recent runs", async () => {
+    // QA finding on #17500: `succeeded` is terminal too. Before this case, the
+    // recent-runs fallback returned an older success and `waitForFixtureRun`
+    // accepted it as if this wakeup had produced it.
+    test.setTimeout(12_500);
+    const board = fakeBoard({
+      list: () => [fakeRun("run-old-succeeded", "succeeded", predecessorCreatedAtMs)],
+    });
+
+    let message = "";
+    try {
+      await invokeHeartbeat(board, agentId, issueId);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain("No verified heartbeat run became available");
+    expect(message).toContain("Ignored terminal predecessor run: run-old-succeeded");
   });
 });
