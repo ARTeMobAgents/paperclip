@@ -2146,7 +2146,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     payload: Record<string, unknown> | null;
     contextSnapshot: Record<string, unknown>;
     issueId: string | null;
-    taskKey: string;
+    taskKey: string | null;
     opts: WakeupOptions;
   }): Promise<typeof heartbeatRuns.$inferSelect | null> {
     const now = new Date();
@@ -2233,7 +2233,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           })
           .where(eq(heartbeatRuns.id, existing.id))
           .returning();
-        await tx.insert(agentWakeupRequests).values({
+        const coalescedWake: typeof agentWakeupRequests.$inferInsert = {
           companyId: input.agent.companyId,
           agentId: input.agent.id,
           source: input.source,
@@ -2248,7 +2248,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           runId: existing.id,
           finishedAt: now,
           updatedAt: now,
-        });
+        };
+        await tx.insert(agentWakeupRequests).values(coalescedWake);
         if (updated) {
           await appendRunEvent(updated, {
             eventType: "provider.quota_gate.deferred",
@@ -2261,21 +2262,22 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         return updated ?? null;
       }
 
+      const parkedWake: typeof agentWakeupRequests.$inferInsert = {
+        companyId: input.agent.companyId,
+        agentId: input.agent.id,
+        source: input.source,
+        triggerDetail: input.triggerDetail,
+        reason: input.reason,
+        payload: input.payload,
+        status: "queued",
+        requestedByActorType: input.opts.requestedByActorType ?? null,
+        requestedByActorId: input.opts.requestedByActorId ?? null,
+        idempotencyKey: input.opts.idempotencyKey ?? null,
+        updatedAt: now,
+      };
       const [wakeupRequest] = await tx
         .insert(agentWakeupRequests)
-        .values({
-          companyId: input.agent.companyId,
-          agentId: input.agent.id,
-          source: input.source,
-          triggerDetail: input.triggerDetail,
-          reason: input.reason,
-          payload: input.payload,
-          status: "queued",
-          requestedByActorType: input.opts.requestedByActorType ?? null,
-          requestedByActorId: input.opts.requestedByActorId ?? null,
-          idempotencyKey: input.opts.idempotencyKey ?? null,
-          updatedAt: now,
-        })
+        .values(parkedWake)
         .returning();
       if (!wakeupRequest) return null;
 
@@ -2294,7 +2296,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             companyId: input.agent.companyId,
             contextSnapshot: input.contextSnapshot,
             issueContext: null,
-            routineEnvContext: null,
+            routineEnvContext: { routineId: null, env: null, responsibleUserId: null },
             requestedByActorType: input.opts.requestedByActorType ?? null,
             requestedByActorId: input.opts.requestedByActorId ?? null,
             source: input.source,
@@ -2522,7 +2524,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           agent,
           hold,
           source,
-          triggerDetail,
+          triggerDetail: triggerDetail ?? undefined,
           reason,
           payload,
           contextSnapshot: enrichedContextSnapshot,
