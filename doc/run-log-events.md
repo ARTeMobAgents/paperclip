@@ -174,6 +174,26 @@ credential material are never written to the run log.
 These records remain run-log events. They do not create an OpenTelemetry or
 Paperclip Telemetry export, and legacy adapters do not use this writer.
 
+## Provider quota gate
+
+A terminal `provider_quota` run is shared model-capacity evidence, not a
+task-scoped retry hint. While its recovery window is active, Paperclip parks
+automatic wakes for agents on the same capacity as a `scheduled_retry` and
+writes `provider.quota_gate.deferred` on the parked run. The payload contains
+the bounded capacity key, the reset instant or bounded fallback, the source run
+id, and its source issue id. It never contains provider output, credentials,
+prompts, or task content.
+
+Explicit human wakes, failed-run retries, task retries, durable chat/case/dot/
+muse handoffs, and execution reconciliation are not parked. A newer successful
+run on the same capacity retires the gate immediately, so recovered capacity is
+never blocked until an old clock expires. A timezone-less clock in provider text
+is never converted into an absolute instant; it only yields the bounded
+fallback window.
+
+These records remain run-log events and add no Telemetry or OpenTelemetry
+export.
+
 ## Semantic Settlement Diagnostics and Retry Logs
 
 Before interrupting a Codex turn, the runner durably records a

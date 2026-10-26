@@ -4,6 +4,11 @@ import { insertIssueComment } from "../issue-comment-writes.js";
 import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modules/external-agents/index.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
+import {
+  findActiveProviderQuotaHold,
+  shouldParkAutomaticWakeForProviderQuota,
+  type ProviderQuotaHold,
+} from "./provider-quota-hold.js";
 import { publishActiveDotComment } from "../dot-assignment-follow-up.js";
 import { publishActiveMuseComment } from "../muse-assignment-follow-up.js";
 import {
@@ -2117,6 +2122,222 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     });
   }
 
+  function buildProviderQuotaGateEventPayload(hold: ProviderQuotaHold) {
+    return {
+      capacityKey: hold.capacityKey,
+      blockedUntil: hold.retryAt.toISOString(),
+      sourceRunId: hold.runId,
+      sourceIssueId: hold.issueId,
+    };
+  }
+
+  /**
+   * Park a wake that arrives while the agent's model capacity is still inside a
+   * terminal provider-quota hold. The parked row is a normal `scheduled_retry`
+   * so the existing periodic promoter resumes it, and the issue keeps a live
+   * execution path instead of being escalated as stranded.
+   */
+  async function deferWakeForProviderQuotaHold(input: {
+    agent: typeof agents.$inferSelect;
+    hold: ProviderQuotaHold;
+    source: WakeupOptions["source"];
+    triggerDetail: WakeupOptions["triggerDetail"];
+    reason: string | null;
+    payload: Record<string, unknown> | null;
+    contextSnapshot: Record<string, unknown>;
+    issueId: string | null;
+    taskKey: string;
+    opts: WakeupOptions;
+  }): Promise<typeof heartbeatRuns.$inferSelect | null> {
+    const now = new Date();
+    const sessionBefore = await resolveSessionBeforeForWakeup(
+      input.agent,
+      input.taskKey,
+    );
+    return db.transaction(async (tx) => {
+      // Serialize competing wakes for this agent so repeated comments merge
+      // into one parked run instead of racing to insert several.
+      await tx.execute(
+        sql`select id from agents where id = ${input.agent.id} and company_id = ${input.agent.companyId} for update`,
+      );
+      const activeHold = await findActiveProviderQuotaHold(
+        tx as unknown as Db,
+        {
+          companyId: input.agent.companyId,
+          agentId: input.agent.id,
+          now,
+        },
+      );
+      if (!activeHold) return null;
+
+      const retryAt = activeHold.retryAt;
+      // A newer quota state must also extend already-parked wakes. Otherwise a
+      // shorter earlier window would promote them and start the same failing
+      // model call before the current reset.
+      await tx
+        .update(heartbeatRuns)
+        .set({
+          scheduledRetryAt: retryAt,
+          contextSnapshot: sql`${heartbeatRuns.contextSnapshot} || ${JSON.stringify({
+            scheduledRetryAt: retryAt.toISOString(),
+            providerQuotaRetryNotBefore: retryAt.toISOString(),
+          })}::jsonb`,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(heartbeatRuns.companyId, input.agent.companyId),
+            eq(heartbeatRuns.status, "scheduled_retry"),
+            eq(heartbeatRuns.scheduledRetryReason, "provider_quota_recovery"),
+            lt(heartbeatRuns.scheduledRetryAt, retryAt),
+            sql`${heartbeatRuns.contextSnapshot} ->> 'providerQuotaCapacityKey' = ${activeHold.capacityKey}`,
+          ),
+        );
+      const scopeCondition = input.issueId
+        ? sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${input.issueId}`
+        : sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' is null`;
+      const [existing] = await tx
+        .select()
+        .from(heartbeatRuns)
+        .where(
+          and(
+            eq(heartbeatRuns.companyId, input.agent.companyId),
+            eq(heartbeatRuns.agentId, input.agent.id),
+            eq(heartbeatRuns.status, "scheduled_retry"),
+            eq(heartbeatRuns.scheduledRetryReason, "provider_quota_recovery"),
+            gt(heartbeatRuns.scheduledRetryAt, now),
+            scopeCondition,
+          ),
+        )
+        .orderBy(desc(heartbeatRuns.createdAt))
+        .limit(1);
+
+      if (existing) {
+        const merged = mergeCoalescedContextSnapshot(
+          existing.contextSnapshot,
+          input.contextSnapshot,
+          { preserveExistingInteractionContinuation: true },
+        );
+        const [updated] = await tx
+          .update(heartbeatRuns)
+          .set({
+            contextSnapshot: {
+              ...merged,
+              retryReason: "provider_quota_recovery",
+              providerQuotaRetryNotBefore: retryAt.toISOString(),
+              providerQuotaCapacityKey: activeHold.capacityKey,
+              scheduledRetryAt: retryAt.toISOString(),
+            },
+            scheduledRetryAt: retryAt,
+            updatedAt: now,
+          })
+          .where(eq(heartbeatRuns.id, existing.id))
+          .returning();
+        await tx.insert(agentWakeupRequests).values({
+          companyId: input.agent.companyId,
+          agentId: input.agent.id,
+          source: input.source,
+          triggerDetail: input.triggerDetail,
+          reason: input.reason,
+          payload: input.payload,
+          status: "coalesced",
+          coalescedCount: 1,
+          requestedByActorType: input.opts.requestedByActorType ?? null,
+          requestedByActorId: input.opts.requestedByActorId ?? null,
+          idempotencyKey: input.opts.idempotencyKey ?? null,
+          runId: existing.id,
+          finishedAt: now,
+          updatedAt: now,
+        });
+        if (updated) {
+          await appendRunEvent(updated, {
+            eventType: "provider.quota_gate.deferred",
+            stream: "system",
+            level: "warn",
+            message: `Wake deferred by provider quota hold until ${retryAt.toISOString()}`,
+            payload: buildProviderQuotaGateEventPayload(activeHold),
+          });
+        }
+        return updated ?? null;
+      }
+
+      const [wakeupRequest] = await tx
+        .insert(agentWakeupRequests)
+        .values({
+          companyId: input.agent.companyId,
+          agentId: input.agent.id,
+          source: input.source,
+          triggerDetail: input.triggerDetail,
+          reason: input.reason,
+          payload: input.payload,
+          status: "queued",
+          requestedByActorType: input.opts.requestedByActorType ?? null,
+          requestedByActorId: input.opts.requestedByActorId ?? null,
+          idempotencyKey: input.opts.idempotencyKey ?? null,
+          updatedAt: now,
+        })
+        .returning();
+      if (!wakeupRequest) return null;
+
+      const [scheduled] = await tx
+        .insert(heartbeatRuns)
+        .values({
+          companyId: input.agent.companyId,
+          agentId: input.agent.id,
+          scopeKind: input.issueId ? "issue" : "company",
+          issueId: input.issueId,
+          invocationSource: input.source,
+          triggerDetail: input.triggerDetail,
+          status: "scheduled_retry",
+          wakeupRequestId: wakeupRequest.id,
+          responsibleUserId: await resolveResponsibleUserIdForRunSeed({
+            companyId: input.agent.companyId,
+            contextSnapshot: input.contextSnapshot,
+            issueContext: null,
+            routineEnvContext: null,
+            requestedByActorType: input.opts.requestedByActorType ?? null,
+            requestedByActorId: input.opts.requestedByActorId ?? null,
+            source: input.source,
+            triggerDetail: input.triggerDetail,
+          }),
+          sessionIdBefore: sessionBefore,
+          retryOfRunId: activeHold.runId,
+          scheduledRetryAt: retryAt,
+          scheduledRetryAttempt: 1,
+          scheduledRetryReason: "provider_quota_recovery",
+          contextSnapshot: {
+            ...input.contextSnapshot,
+            retryOfRunId: activeHold.runId,
+            retryReason: "provider_quota_recovery",
+            wakeReason:
+              readNonEmptyString(input.contextSnapshot.wakeReason) ??
+              input.reason,
+            scheduledRetryAttempt: 1,
+            scheduledRetryAt: retryAt.toISOString(),
+            providerQuotaRetryNotBefore: retryAt.toISOString(),
+            providerQuotaCapacityKey: activeHold.capacityKey,
+            errorFamily: "provider_quota",
+          },
+          updatedAt: now,
+        })
+        .returning();
+      if (!scheduled) return null;
+
+      await tx
+        .update(agentWakeupRequests)
+        .set({ runId: scheduled.id, updatedAt: now })
+        .where(eq(agentWakeupRequests.id, wakeupRequest.id));
+      await appendRunEvent(scheduled, {
+        eventType: "provider.quota_gate.deferred",
+        stream: "system",
+        level: "warn",
+        message: `Wake deferred by provider quota hold until ${retryAt.toISOString()}`,
+        payload: buildProviderQuotaGateEventPayload(activeHold),
+      });
+      return scheduled;
+    });
+  }
+
   // Public wakeup entry point. Callers dispatch it fire-and-forget, so register
   // the promise in activeWakeupPromises before it starts its asynchronous
   // prologue. drainActiveRunExecutions can then await a wake that is still before
@@ -2271,6 +2492,45 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       if (isConversationAdapter(agent.adapterType) || agent.adapterType === "paperclip_runner") {
         enrichedContextSnapshot.previousRunId = failed.id;
         enrichedContextSnapshot.forceFreshSession = true;
+      }
+    }
+
+    // A terminal provider-quota state is shared model capacity, not a
+    // task-scoped retry hint. Park every automatic wake until the persisted
+    // reset window (or bounded fallback) elapses instead of paying for another
+    // zero-token invocation. Explicit user actions keep their authority.
+    if (
+      shouldParkAutomaticWakeForProviderQuota({
+        manualUserWake: opts.manualUserWake,
+        failedRunId: opts.failedRunId,
+        taskRetryRequestId: opts.taskRetryRequestId,
+        durableChatRequest: opts.durableChatRequest,
+        durableCaseHandoffRequest: opts.durableCaseHandoffRequest,
+        durableDotRequest: opts.durableDotRequest,
+        durableMuseRequest: opts.durableMuseRequest,
+        requestedByActorType: opts.requestedByActorType,
+        executionReconciliationWake,
+      })
+    ) {
+      const hold = await findActiveProviderQuotaHold(db, {
+        companyId: agent.companyId,
+        agentId,
+        now: new Date(),
+      });
+      if (hold) {
+        const parked = await deferWakeForProviderQuotaHold({
+          agent,
+          hold,
+          source,
+          triggerDetail,
+          reason,
+          payload,
+          contextSnapshot: enrichedContextSnapshot,
+          issueId,
+          taskKey,
+          opts,
+        });
+        if (parked) return parked;
       }
     }
 
