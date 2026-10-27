@@ -10,6 +10,7 @@ export function registerScheduledWork(
     retryMs: number;
     tickTimers: () => Promise<unknown>;
     tickRoutines: () => Promise<unknown>;
+    promoteProviderQuotaRetries: () => Promise<unknown>;
   },
 ) {
   function register(queue: DeliveryQueue, work: () => Promise<unknown>, query: (now: Date) => SQL) {
@@ -42,5 +43,9 @@ export function registerScheduledWork(
     WHERE c.status = 'active' AND i.status IN ('in_progress', 'in_review')
       AND i.assignee_agent_id IS NOT NULL AND i.assignee_user_id IS NULL
       AND i.monitor_next_check_at > ${now.toISOString()}::timestamptz`);
-  return { routines, timers };
+  const providerQuotaRetries = register(DELIVERY_QUEUES.providerQuotaRetries, options.promoteProviderQuotaRetries, now => sql`
+    SELECT min(scheduled_retry_at) AS next_at FROM heartbeat_runs
+    WHERE status = 'scheduled_retry' AND scheduled_retry_reason = 'provider_quota_recovery'
+      AND scheduled_retry_at > ${now.toISOString()}::timestamptz`);
+  return { routines, timers, providerQuotaRetries };
 }

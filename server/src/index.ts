@@ -1954,6 +1954,11 @@ async function startServerWithDatabaseTeardown(
     const startHeartbeatScheduler = () => {
       const scheduled = registerScheduledWork(deliveryWork, db, {
         retryMs: config.heartbeatSchedulerIntervalMs,
+        promoteProviderQuotaRetries: async () => {
+          if ((await heartbeat.resolveSchedulingSuppression()).suppressed) return;
+          const result = await heartbeat.promoteDueScheduledRetries();
+          if (result.promoted > 0) logger.info({ ...result }, "provider quota retries promoted at deadline");
+        },
         tickTimers: async () => {
           if ((await heartbeat.resolveSchedulingSuppression()).suppressed) return;
           const result = await heartbeat.tickTimers(new Date());
@@ -1963,7 +1968,7 @@ async function startServerWithDatabaseTeardown(
           if (result.triggered > 0) logger.info({ ...result }, "routine scheduler tick enqueued runs");
         }),
       });
-      trackHeartbeatSchedulerWork(Promise.all([scheduled.timers.ready, scheduled.routines.ready]));
+      trackHeartbeatSchedulerWork(Promise.all([scheduled.timers.ready, scheduled.routines.ready, scheduled.providerQuotaRetries.ready]));
       startHeartbeatSchedulerInterval(createHeartbeatSchedulerTick(scheduled));
     };
     trackHeartbeatSchedulerWork(runStartupHousekeeping().then(() => {

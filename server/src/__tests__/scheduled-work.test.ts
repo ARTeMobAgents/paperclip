@@ -13,11 +13,11 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-function fixture(input: { routine?: number | null; monitor?: number | null; tickTimers?: () => Promise<void>; tickRoutines?: () => Promise<void> } = {}) {
+function fixture(input: { routine?: number | null; monitor?: number | null; quota?: number | null; tickTimers?: () => Promise<void>; tickRoutines?: () => Promise<void>; promoteProviderQuotaRetries?: () => Promise<void> } = {}) {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2020-01-01T00:00:00.000Z"));
   const dialect = new PgDialect();
-  const deadlines = { routine: input.routine ?? null, monitor: input.monitor ?? null };
+  const deadlines = { routine: input.routine ?? null, monitor: input.monitor ?? null, quota: input.quota ?? null };
   let canRun = true;
   let canReconcile = true;
   let failRead = false;
@@ -26,7 +26,7 @@ function fixture(input: { routine?: number | null; monitor?: number | null; tick
     const text = compiled.sql;
     if (text.includes("pg_current_xact_id")) return [{ xid: "42" }];
     if (failRead) throw new Error("database unavailable");
-    const at = deadlines[text.includes("routine_triggers") ? "routine" : "monitor"];
+    const at = deadlines[text.includes("routine_triggers") ? "routine" : text.includes("heartbeat_runs") ? "quota" : "monitor"];
     return [{ next_at: at !== null && at > Date.parse(String(compiled.params[0])) ? new Date(at) : null }];
   });
   const owner = installDatabaseWorkSignals({ execute, async transaction(callback: (tx: any) => Promise<any>) {
@@ -37,14 +37,25 @@ function fixture(input: { routine?: number | null; monitor?: number | null; tick
   coordinators.push(coordinator);
   const tickTimers = vi.fn(input.tickTimers ?? (async () => {}));
   const tickRoutines = vi.fn(input.tickRoutines ?? (async () => {}));
+  const promoteProviderQuotaRetries = vi.fn(input.promoteProviderQuotaRetries ?? (async () => {}));
   const workers = registerScheduledWork(coordinator, owner as unknown as Db,
-    { retryMs: 60_000, tickTimers, tickRoutines });
-  return { coordinator, workers, owner, deadlines, execute, tickTimers, tickRoutines, errors,
-    ready: () => Promise.all([workers.routines.ready, workers.timers.ready]),
+    { retryMs: 60_000, tickTimers, tickRoutines, promoteProviderQuotaRetries });
+  return { coordinator, workers, owner, deadlines, execute, tickTimers, tickRoutines, promoteProviderQuotaRetries, errors,
+    ready: () => Promise.all([workers.routines.ready, workers.timers.ready, workers.providerQuotaRetries.ready]),
     canRun: (value: boolean) => { canRun = value; }, canReconcile: (value: boolean) => { canReconcile = value; }, failRead: (value: boolean) => { failRead = value; } };
 }
 
 describe("scheduled routine and monitor deadlines", () => {
+  it("promotes a parked provider quota wake at its durable deadline", async () => {
+    const now = Date.UTC(2020, 0, 1);
+    const f = fixture({ quota: now + 10_000 });
+    await f.ready();
+    expect(f.coordinator.nextWakeAt()).toBe(now + 10_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(f.promoteProviderQuotaRetries).toHaveBeenCalledTimes(2);
+    expect(f.coordinator.nextWakeAt()).toBeNull();
+  });
+
   it("dispatches at each saved deadline without waiting for a periodic tick", async () => {
     const now = Date.UTC(2020, 0, 1);
     const f = fixture({ routine: now + 10_000, monitor: now + 20_000 });
@@ -60,10 +71,10 @@ describe("scheduled routine and monitor deadlines", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(f.tickTimers).toHaveBeenCalledTimes(2);
     expect(f.coordinator.nextWakeAt()).toBeNull();
-    expect(f.execute).toHaveBeenCalledTimes(4);
+    expect(f.execute).toHaveBeenCalledTimes(5);
     expect(idleWorkSnapshot().active).toBe(0);
     await vi.advanceTimersByTimeAsync(3_600_000);
-    expect(f.execute).toHaveBeenCalledTimes(4);
+    expect(f.execute).toHaveBeenCalledTimes(5);
   });
 
   it.each(["routine", "monitor"] as const)("rescans a %s deadline crossed during an earlier scan", async kind => {
@@ -138,7 +149,7 @@ describe("scheduled routine and monitor deadlines", () => {
     expect(idleWorkSnapshot().active).toBe(0);
     f.canReconcile(false);
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(f.execute).toHaveBeenCalledTimes(2);
+    expect(f.execute).toHaveBeenCalledTimes(3);
     await f.coordinator.stop();
     f.canRun(true);
     await vi.advanceTimersByTimeAsync(3_600_000);

@@ -219,15 +219,13 @@ describe("isCodexTransientUpstreamError", () => {
     ).toBe(true);
   });
 
-  it("classifies usage-limit windows as provider quota and extracts the retry time", () => {
+  it("classifies usage-limit windows without inventing a timezone", () => {
     const errorMessage = "You've hit your usage limit for GPT-5.3-Codex-Spark. Switch to another model now, or try again at 11:31 PM.";
-    const now = new Date(2026, 3, 22, 22, 29, 2);
+    const now = new Date("2026-04-22T22:29:02.000Z");
 
     expect(isCodexProviderQuotaError({ errorMessage })).toBe(true);
     expect(isCodexTransientUpstreamError({ errorMessage })).toBe(false);
-    expect(extractCodexRetryNotBefore({ errorMessage }, now)?.getTime()).toBe(
-      new Date(2026, 3, 22, 23, 31, 0, 0).getTime(),
-    );
+    expect(extractCodexRetryNotBefore({ errorMessage }, now)).toBeNull();
   });
 
   it("classifies model-capacity messages as provider quota without reset metadata", () => {
@@ -245,6 +243,12 @@ describe("isCodexTransientUpstreamError", () => {
     expect(extractCodexRetryNotBefore({ errorMessage }, now)?.toISOString()).toBe(
       "2026-04-23T04:31:00.000Z",
     );
+  });
+
+  it("holds through every possible timezone for a dated quota reset without a timezone", () => {
+    const errorMessage = "You've hit your usage limit for gpt-6-astra until Nov 2nd, 2026 9:55 AM.";
+    expect(extractCodexRetryNotBefore({ errorMessage }, new Date("2026-10-27T10:49:00.000Z")))
+      .toEqual(new Date("2026-11-02T21:55:00.000Z"));
   });
 
   it("does not classify deterministic compaction errors as transient", () => {

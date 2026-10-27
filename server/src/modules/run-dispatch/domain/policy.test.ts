@@ -30,6 +30,7 @@ function baseGateFacts(): ScheduledRetryFacts {
     agentInvokabilityDetails: {},
     agentInvokabilityInvalidOrgChain: false,
     heartbeatWakeOnDemandEnabled: true,
+    isParkedTimerWake: false,
     issueFound: true,
     issueStatus: "in_progress",
     issueAssigneeAgentId: "agent-1",
@@ -84,6 +85,13 @@ describe("decideScheduledRetryGate", () => {
   it("allows a run with no issueId before any issue check runs", () => {
     const facts = { ...baseGateFacts(), issueId: null, issueFound: false };
     expect(decideScheduledRetryGate(facts, NOW)).toEqual({ allowed: true });
+  });
+
+  it("preserves timer admission for a parked provider quota wake", () => {
+    expect(decideScheduledRetryGate({ ...baseGateFacts(), heartbeatWakeOnDemandEnabled: false, isParkedTimerWake: true }, NOW))
+      .toEqual({ allowed: true });
+    expect(decideScheduledRetryGate({ ...baseGateFacts(), heartbeatWakeOnDemandEnabled: false }, NOW))
+      .toMatchObject({ allowed: false, errorCode: "heartbeat_wake_on_demand_disabled" });
   });
 
   it("allows a run when every rule passes", () => {

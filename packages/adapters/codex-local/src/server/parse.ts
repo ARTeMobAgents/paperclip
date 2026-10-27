@@ -9,6 +9,7 @@ const CODEX_TRANSIENT_UPSTREAM_RE =
 const CODEX_REMOTE_COMPACTION_RE = /remote\s+compact\s+task/i;
 const CODEX_USAGE_LIMIT_RE =
   /you(?:'|’)ve hit your usage limit for .+\.\s+switch to another model now,\s+or try again at\s+([^.!\n]+)(?:[.!]|\n|$)/i;
+const CODEX_DATED_USAGE_RESET_RE = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\s+(\d{1,2}):(\d{2})\s*([ap])\.?m\.?\b/i;
 const CODEX_PROVIDER_QUOTA_RE =
   /(?:you(?:'|’)ve hit your usage limit|usage limit|model (?:is )?at capacity|at capacity for this model|capacity limit)/i;
 const CODEX_REFRESH_TOKEN_REUSED_RE =
@@ -290,22 +291,14 @@ function parseLocalClockTime(clockText: string, now: Date): Date | null {
   if ((match[3] ?? "").toLowerCase() === "p") hour24 += 12;
 
   const timeZoneHint = match[4] ?? match[5];
-  if (timeZoneHint) {
-    const explicitRetryAt = nextClockTimeInTimeZone({
-      now,
-      hour: hour24,
-      minute,
-      timeZoneHint,
-    });
-    if (explicitRetryAt) return explicitRetryAt;
-  }
-
-  const retryAt = new Date(now);
-  retryAt.setHours(hour24, minute, 0, 0);
-  if (retryAt.getTime() <= now.getTime()) {
-    retryAt.setDate(retryAt.getDate() + 1);
-  }
-  return retryAt;
+  // The provider's clock is not tied to the server's local timezone. Without
+  // a supported timezone hint, no absolute retry instant can be persisted.
+  return timeZoneHint ? nextClockTimeInTimeZone({
+    now,
+    hour: hour24,
+    minute,
+    timeZoneHint,
+  }) : null;
 }
 
 export function extractCodexRetryNotBefore(input: {
@@ -314,6 +307,28 @@ export function extractCodexRetryNotBefore(input: {
   errorMessage?: string | null;
 }, now = new Date()): Date | null {
   const haystack = buildCodexErrorHaystack(input);
+  // A dated wall clock without a timezone is not an exact reset. The latest
+  // possible UTC instant (UTC-12) is a conservative not-before bound: no
+  // supported timezone can still be before the stated date after it.
+  if (CODEX_PROVIDER_QUOTA_RE.test(haystack)) {
+    const dated = haystack.match(CODEX_DATED_USAGE_RESET_RE);
+    if (dated) {
+      const month = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+        .indexOf((dated[1] ?? "").slice(0, 3).toLowerCase());
+      const day = Number(dated[2]);
+      const year = Number(dated[3]);
+      const hour = Number(dated[4]);
+      const minute = Number(dated[5]);
+      if (month >= 0 && year >= 2000 && day >= 1 && day <= 31 && hour >= 1 && hour <= 12 && minute >= 0 && minute <= 59) {
+        const wallHour = hour % 12 + (dated[6]?.toLowerCase() === "p" ? 12 : 0);
+        const dayCheck = new Date(Date.UTC(year, month, day));
+        if (dayCheck.getUTCFullYear() === year && dayCheck.getUTCMonth() === month && dayCheck.getUTCDate() === day) {
+          const bound = new Date(Date.UTC(year, month, day, wallHour + 12, minute));
+          if (bound.getTime() > now.getTime()) return bound;
+        }
+      }
+    }
+  }
   const usageLimitMatch = haystack.match(CODEX_USAGE_LIMIT_RE);
   if (!usageLimitMatch) return null;
   return parseLocalClockTime(usageLimitMatch[1] ?? "", now);

@@ -43,6 +43,11 @@ describe("provider quota capacity key", () => {
       adapterType: "codex_local", adapterConfig: { model: "gpt-6-sol" },
     })).not.toBe("codex_local:adapter:codex_local:model:gpt-6-astra");
   });
+
+  it("uses the effective Codex model for legacy aliases", () => {
+    expect(resolveProviderQuotaCapacityKey({ adapterType: "codex_local", adapterConfig: { model: "gpt-5.6" } }))
+      .toBe(resolveProviderQuotaCapacityKey({ adapterType: "codex_local", adapterConfig: { model: "gpt-5.6-sol" } }));
+  });
 });
 
 describe("provider quota reset resolution", () => {
@@ -92,6 +97,7 @@ describe("provider quota reset resolution", () => {
 describe("automatic wake parking policy", () => {
   it("parks automatic wakes but keeps explicit human and typed continuations", () => {
     expect(shouldParkAutomaticWakeForProviderQuota({ requestedByActorType: "system" })).toBe(true);
+    expect(shouldParkAutomaticWakeForProviderQuota({ source: "timer", requestedByActorType: "system" })).toBe(true);
     expect(shouldParkAutomaticWakeForProviderQuota({ manualUserWake: true, requestedByActorType: "user" })).toBe(false);
     expect(shouldParkAutomaticWakeForProviderQuota({ failedRunId: "run-1" })).toBe(false);
     expect(shouldParkAutomaticWakeForProviderQuota({ taskRetryRequestId: "wake-1" })).toBe(false);

@@ -77,6 +77,7 @@ import { RunDispatchApplicationError } from "../application/types.js";
 
 type HeartbeatRun = typeof heartbeatRuns.$inferSelect;
 type LoadGateFactsInput = {
+  invocationSource?: string;
   conversationContinuation: boolean;
   responsibleUserId: string | null;
   runId: string;
@@ -326,6 +327,7 @@ export function createPostgresRunDispatchAdapter(
       agentInvokabilityDetails: {},
       agentInvokabilityInvalidOrgChain: false,
       heartbeatWakeOnDemandEnabled: true,
+      isParkedTimerWake: input.scheduledRetryReason === "provider_quota_recovery" && input.invocationSource === "timer",
       issueFound: false,
       issueStatus: null,
       issueAssigneeAgentId: null,
@@ -355,7 +357,7 @@ export function createPostgresRunDispatchAdapter(
     if (!facts.agentInvokable) return { agentFound: true, facts };
 
     facts.heartbeatWakeOnDemandEnabled = isHeartbeatWakeOnDemandEnabled(agent);
-    if (!facts.heartbeatWakeOnDemandEnabled) return { agentFound: true, facts };
+    if (!facts.heartbeatWakeOnDemandEnabled && !facts.isParkedTimerWake) return { agentFound: true, facts };
 
     if (!issueId) return { agentFound: true, facts };
 
@@ -800,6 +802,7 @@ export function createPostgresRunDispatchAdapter(
           contextSnapshot: parseObject(run.contextSnapshot),
           scheduledRetryReason: run.scheduledRetryReason,
           retryReasonOverride: run.scheduledRetryReason,
+          invocationSource: run.invocationSource,
           wakeupRequestId: run.wakeupRequestId,
         },
         now,

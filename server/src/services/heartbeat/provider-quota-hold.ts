@@ -2,6 +2,8 @@ import { and, desc, eq, gt, gte, inArray, lt, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, heartbeatRuns } from "@paperclipai/db";
 import { parseObject } from "../../adapters/utils.js";
+import { normalizeCodexModel } from "@paperclipai/adapter-codex-local";
+import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
 
 /**
  * A terminal provider-quota failure is a shared model-capacity signal, not a
@@ -54,10 +56,13 @@ export function resolveProviderQuotaCapacityKey(input: {
   const adapterConfig = parseObject(input.adapterConfig);
   const runtimeConfig = parseObject(input.runtimeConfig);
   const runtimeConnection = parseObject(runtimeConfig.aiConnection);
-  const model = (
+  const configuredModel = (
     readNonEmptyString(adapterConfig.model) ??
     readNonEmptyString(runtimeConfig.model)
   )?.toLowerCase();
+  const model = configuredModel && input.adapterType === "codex_local"
+    ? normalizeCodexModel(configuredModel)
+    : configuredModel;
   const provider = (
     readNonEmptyString(billing.provider) ??
     readNonEmptyString(adapterConfig.provider) ??
@@ -124,9 +129,6 @@ export function shouldParkAutomaticWakeForProviderQuota(input: {
   executionReconciliationWake?: boolean;
   source?: string | null;
 }): boolean {
-  // Timer wakes are already bounded by their configured interval; parking one
-  // would turn it into a retry that the on-demand gate later cancels.
-  if (input.source === "timer") return false;
   return Boolean(
     !input.manualUserWake &&
       !input.failedRunId &&
@@ -197,22 +199,26 @@ export async function releaseProviderQuotaParkedRuns(
   const now = input.now ?? new Date();
   const current = await readAgentCapacityKey(db, input);
   if (!current) return;
-  await db
-    .update(heartbeatRuns)
-    .set({
-      scheduledRetryAt: now,
-      contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({ providerQuotaReleasedAt: now.toISOString() })}::jsonb`,
-      updatedAt: now,
-    })
-    .where(
-      and(
-        eq(heartbeatRuns.companyId, input.companyId),
-        eq(heartbeatRuns.status, "scheduled_retry"),
-        eq(heartbeatRuns.scheduledRetryReason, "provider_quota_recovery"),
-        gt(heartbeatRuns.scheduledRetryAt, now),
-        sql`${heartbeatRuns.contextSnapshot} ->> 'providerQuotaCapacityKey' = ${current.capacityKey}`,
-      ),
-    );
+  const whereParked = and(
+    eq(heartbeatRuns.companyId, input.companyId),
+    eq(heartbeatRuns.status, "scheduled_retry"),
+    eq(heartbeatRuns.scheduledRetryReason, "provider_quota_recovery"),
+    gt(heartbeatRuns.scheduledRetryAt, now),
+    sql`${heartbeatRuns.contextSnapshot} ->> 'providerQuotaCapacityKey' = ${current.capacityKey}`,
+  );
+  const [parked] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(whereParked).limit(1);
+  if (!parked) return;
+  await db.transaction(async (tx) => {
+    await notifyDeliveryWork(tx, DELIVERY_QUEUES.providerQuotaRetries);
+    await tx
+      .update(heartbeatRuns)
+      .set({
+        scheduledRetryAt: now,
+        contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({ providerQuotaReleasedAt: now.toISOString() })}::jsonb`,
+        updatedAt: now,
+      })
+      .where(whereParked);
+  });
 }
 
 /**

@@ -5,6 +5,7 @@ import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modul
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
 import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
+import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
 import {
   releaseProviderQuotaParkedRuns,
   findActiveProviderQuotaHold,
@@ -2215,6 +2216,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         .limit(1);
 
       if (existing) {
+        await notifyDeliveryWork(tx, DELIVERY_QUEUES.providerQuotaRetries);
         const merged = mergeCoalescedContextSnapshot(
           existing.contextSnapshot,
           input.contextSnapshot,
@@ -2267,6 +2269,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         return updated ?? null;
       }
 
+      await notifyDeliveryWork(tx, DELIVERY_QUEUES.providerQuotaRetries);
       const parkedWake: typeof agentWakeupRequests.$inferInsert = {
         companyId: input.agent.companyId,
         agentId: input.agent.id,

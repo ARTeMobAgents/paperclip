@@ -89,6 +89,7 @@ export type ScheduledRetryFacts = {
   agentInvokabilityInvalidOrgChain: boolean;
 
   heartbeatWakeOnDemandEnabled: boolean;
+  isParkedTimerWake: boolean;
 
   issueFound: boolean;
   issueStatus: string | null;
@@ -290,7 +291,7 @@ export function decideScheduledRetryGate(
     };
   }
 
-  if (!facts.heartbeatWakeOnDemandEnabled) {
+  if (!facts.heartbeatWakeOnDemandEnabled && !facts.isParkedTimerWake) {
     return {
       allowed: false,
       reason:
