@@ -1,6 +1,6 @@
-import { and, desc, eq, gte, inArray, or } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, lt, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { agents, agentRuntimeState, heartbeatRuns } from "@paperclipai/db";
+import { agents, heartbeatRuns } from "@paperclipai/db";
 import { parseObject } from "../../adapters/utils.js";
 
 /**
@@ -19,6 +19,8 @@ export const PROVIDER_QUOTA_HOLD_FALLBACK_MS = 60 * 60 * 1000;
 
 /** Only terminal evidence inside this window can hold new wakes. */
 export const PROVIDER_QUOTA_HOLD_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+
+const PROVIDER_QUOTA_HOLD_PAGE_SIZE = 200;
 
 const TERMINAL_STATUSES = ["succeeded", "failed", "cancelled", "timed_out"] as const;
 
@@ -52,6 +54,10 @@ export function resolveProviderQuotaCapacityKey(input: {
   const adapterConfig = parseObject(input.adapterConfig);
   const runtimeConfig = parseObject(input.runtimeConfig);
   const runtimeConnection = parseObject(runtimeConfig.aiConnection);
+  const model = (
+    readNonEmptyString(adapterConfig.model) ??
+    readNonEmptyString(runtimeConfig.model)
+  )?.toLowerCase();
   const provider = (
     readNonEmptyString(billing.provider) ??
     readNonEmptyString(adapterConfig.provider) ??
@@ -60,13 +66,13 @@ export function resolveProviderQuotaCapacityKey(input: {
     "unknown"
   ).toLowerCase();
   const biller = readNonEmptyString(billing.biller)?.toLowerCase();
-  if (biller && biller !== "unknown") return `${provider}:biller:${biller}`;
+  if (biller && biller !== "unknown") return `${provider}:biller:${biller}${model ? `:model:${model}` : ""}`;
   const account =
     readNonEmptyString(billing.accountName) ??
     readNonEmptyString(billing.identity) ??
     readNonEmptyString(billing.sessionIdentity);
-  if (account) return `${provider}:account:${account}`;
-  return `${provider}:adapter:${readNonEmptyString(input.adapterType)?.toLowerCase() ?? "unknown"}`;
+  if (account) return `${provider}:account:${account}${model ? `:model:${model}` : ""}`;
+  return `${provider}:adapter:${readNonEmptyString(input.adapterType)?.toLowerCase() ?? "unknown"}${model ? `:model:${model}` : ""}`;
 }
 
 /**
@@ -116,7 +122,11 @@ export function shouldParkAutomaticWakeForProviderQuota(input: {
   durableMuseRequest?: unknown;
   requestedByActorType?: string | null;
   executionReconciliationWake?: boolean;
+  source?: string | null;
 }): boolean {
+  // Timer wakes are already bounded by their configured interval; parking one
+  // would turn it into a retry that the on-demand gate later cancels.
+  if (input.source === "timer") return false;
   return Boolean(
     !input.manualUserWake &&
       !input.failedRunId &&
@@ -149,27 +159,60 @@ async function readAgentCapacityKey(
     .where(and(eq(agents.id, input.agentId), eq(agents.companyId, input.companyId)))
     .limit(1);
   if (!agent) return null;
-  const [runtimeState] = await db
-    .select({ stateJson: agentRuntimeState.stateJson })
-    .from(agentRuntimeState)
+  // The selected managed account is persisted on the run that executed, not on
+  // agent runtime state. Use the latest run so the incoming wake and historical
+  // evidence resolve to the same account.
+  const [latest] = await db
+    .select({ contextSnapshot: heartbeatRuns.contextSnapshot })
+    .from(heartbeatRuns)
     .where(
       and(
-        eq(agentRuntimeState.agentId, input.agentId),
-        eq(agentRuntimeState.companyId, input.companyId),
+        eq(heartbeatRuns.companyId, input.companyId),
+        eq(heartbeatRuns.agentId, input.agentId),
       ),
     )
+    .orderBy(desc(heartbeatRuns.createdAt))
     .limit(1);
   return {
     capacityKey: resolveProviderQuotaCapacityKey({
       adapterType: agent.adapterType,
       adapterConfig: agent.adapterConfig,
       runtimeConfig: agent.runtimeConfig,
-      billingIdentity: parseObject(runtimeState?.stateJson).billingIdentity,
+      billingIdentity: parseObject(parseObject(latest?.contextSnapshot).aiConnection),
     }),
     adapterType: agent.adapterType,
     adapterConfig: agent.adapterConfig,
     runtimeConfig: agent.runtimeConfig,
   };
+}
+
+/**
+ * A successful run retires the capacity hold; bring this agent's parked wakes
+ * forward so preserved task work resumes without waiting for the old clock.
+ */
+export async function releaseProviderQuotaParkedRuns(
+  db: Db,
+  input: { companyId: string; agentId: string; now?: Date },
+): Promise<void> {
+  const now = input.now ?? new Date();
+  const current = await readAgentCapacityKey(db, input);
+  if (!current) return;
+  await db
+    .update(heartbeatRuns)
+    .set({
+      scheduledRetryAt: now,
+      contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({ providerQuotaReleasedAt: now.toISOString() })}::jsonb`,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(heartbeatRuns.companyId, input.companyId),
+        eq(heartbeatRuns.status, "scheduled_retry"),
+        eq(heartbeatRuns.scheduledRetryReason, "provider_quota_recovery"),
+        gt(heartbeatRuns.scheduledRetryAt, now),
+        sql`${heartbeatRuns.contextSnapshot} ->> 'providerQuotaCapacityKey' = ${current.capacityKey}`,
+      ),
+    );
 }
 
 /**
@@ -189,66 +232,80 @@ export async function findActiveProviderQuotaHold(
   const current = await readAgentCapacityKey(db, input);
   if (!current) return null;
 
-  const rows = await db
-    .select({
-      id: heartbeatRuns.id,
-      agentId: heartbeatRuns.agentId,
-      issueId: heartbeatRuns.issueId,
-      status: heartbeatRuns.status,
-      errorCode: heartbeatRuns.errorCode,
-      contextSnapshot: heartbeatRuns.contextSnapshot,
-      resultJson: heartbeatRuns.resultJson,
-      finishedAt: heartbeatRuns.finishedAt,
-      agentAdapterType: agents.adapterType,
-      agentAdapterConfig: agents.adapterConfig,
-      agentRuntimeConfig: agents.runtimeConfig,
-      agentStateJson: agentRuntimeState.stateJson,
-    })
-    .from(heartbeatRuns)
-    .innerJoin(agents, eq(agents.id, heartbeatRuns.agentId))
-    .leftJoin(
-      agentRuntimeState,
-      eq(agentRuntimeState.agentId, heartbeatRuns.agentId),
-    )
-    .where(
-      and(
-        eq(heartbeatRuns.companyId, input.companyId),
-        inArray(heartbeatRuns.status, [...TERMINAL_STATUSES]),
-        gte(
-          heartbeatRuns.finishedAt,
-          new Date(now.getTime() - PROVIDER_QUOTA_HOLD_LOOKBACK_MS),
+  // Keyset paging so rows from other capacities cannot push this capacity's
+  // terminal state past a fixed row budget. The 24-hour window bounds history;
+  // an arbitrary page cap could admit a known exhausted capacity.
+  let cursor: { finishedAt: Date; id: string } | null = null;
+  while (true) {
+    const rows = await db
+      .select({
+        id: heartbeatRuns.id,
+        agentId: heartbeatRuns.agentId,
+        issueId: heartbeatRuns.issueId,
+        status: heartbeatRuns.status,
+        errorCode: heartbeatRuns.errorCode,
+        contextSnapshot: heartbeatRuns.contextSnapshot,
+        resultJson: heartbeatRuns.resultJson,
+        finishedAt: heartbeatRuns.finishedAt,
+        agentAdapterType: agents.adapterType,
+        agentAdapterConfig: agents.adapterConfig,
+        agentRuntimeConfig: agents.runtimeConfig,
+      })
+      .from(heartbeatRuns)
+      .innerJoin(agents, eq(agents.id, heartbeatRuns.agentId))
+      .where(
+        and(
+          eq(heartbeatRuns.companyId, input.companyId),
+          inArray(heartbeatRuns.status, [...TERMINAL_STATUSES]),
+          gte(
+            heartbeatRuns.finishedAt,
+            new Date(now.getTime() - PROVIDER_QUOTA_HOLD_LOOKBACK_MS),
+          ),
+          or(
+            eq(heartbeatRuns.errorCode, "provider_quota"),
+            eq(heartbeatRuns.status, "succeeded"),
+          ),
+          cursor
+            ? or(
+                lt(heartbeatRuns.finishedAt, cursor.finishedAt),
+                and(
+                  eq(heartbeatRuns.finishedAt, cursor.finishedAt),
+                  lt(heartbeatRuns.id, cursor.id),
+                ),
+              )
+            : undefined,
         ),
-        or(
-          eq(heartbeatRuns.errorCode, "provider_quota"),
-          eq(heartbeatRuns.status, "succeeded"),
-        ),
-      ),
-    )
-    .orderBy(desc(heartbeatRuns.finishedAt))
-    .limit(200);
+      )
+      .orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.id))
+      .limit(PROVIDER_QUOTA_HOLD_PAGE_SIZE);
 
-  for (const row of rows) {
-    const capacityKey = resolveProviderQuotaCapacityKey({
-      adapterType: row.agentAdapterType,
-      adapterConfig: row.agentAdapterConfig,
-      runtimeConfig: row.agentRuntimeConfig,
-      billingIdentity: parseObject(row.agentStateJson).billingIdentity,
-    });
-    if (capacityKey !== current.capacityKey) continue;
-    if (row.errorCode !== "provider_quota") return null;
+    for (const row of rows) {
+      const capacityKey = resolveProviderQuotaCapacityKey({
+        adapterType: row.agentAdapterType,
+        adapterConfig: row.agentAdapterConfig,
+        runtimeConfig: row.agentRuntimeConfig,
+        billingIdentity: parseObject(parseObject(row.contextSnapshot).aiConnection),
+      });
+      if (capacityKey !== current.capacityKey) continue;
+      if (row.errorCode !== "provider_quota") return null;
 
-    const retryAt = readProviderQuotaHoldRetryAt(row, now);
-    if (!retryAt) return null;
-    return {
-      runId: row.id,
-      agentId: row.agentId,
-      issueId:
-        row.issueId ??
-        readNonEmptyString(parseObject(row.contextSnapshot).issueId) ??
-        null,
-      retryAt,
-      capacityKey,
-    };
+      const retryAt = readProviderQuotaHoldRetryAt(row, now);
+      if (!retryAt) return null;
+      return {
+        runId: row.id,
+        agentId: row.agentId,
+        issueId:
+          row.issueId ??
+          readNonEmptyString(parseObject(row.contextSnapshot).issueId) ??
+          null,
+        retryAt,
+        capacityKey,
+      };
+    }
+
+    const last = rows[rows.length - 1];
+    if (!last || rows.length < PROVIDER_QUOTA_HOLD_PAGE_SIZE || !last.finishedAt) break;
+    cursor = { finishedAt: last.finishedAt, id: last.id };
   }
 
   return null;

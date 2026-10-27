@@ -4,7 +4,9 @@ import { insertIssueComment } from "../issue-comment-writes.js";
 import { withExternalAdmissionGuard, assertNoExternalOverlap } from "../../modules/external-agents/index.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
+import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
 import {
+  releaseProviderQuotaParkedRuns,
   findActiveProviderQuotaHold,
   shouldParkAutomaticWakeForProviderQuota,
   type ProviderQuotaHold,
@@ -2251,7 +2253,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         };
         await tx.insert(agentWakeupRequests).values(coalescedWake);
         if (updated) {
-          await appendRunEvent(updated, {
+          await appendHeartbeatRunEvent(tx as unknown as Db, {
+            companyId: updated.companyId,
+            runId: updated.id,
+            agentId: updated.agentId,
             eventType: "provider.quota_gate.deferred",
             stream: "system",
             level: "warn",
@@ -2329,7 +2334,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         .update(agentWakeupRequests)
         .set({ runId: scheduled.id, updatedAt: now })
         .where(eq(agentWakeupRequests.id, wakeupRequest.id));
-      await appendRunEvent(scheduled, {
+      await appendHeartbeatRunEvent(tx as unknown as Db, {
+        companyId: scheduled.companyId,
+        runId: scheduled.id,
+        agentId: scheduled.agentId,
         eventType: "provider.quota_gate.deferred",
         stream: "system",
         level: "warn",
@@ -2512,6 +2520,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         durableMuseRequest: opts.durableMuseRequest,
         requestedByActorType: opts.requestedByActorType,
         executionReconciliationWake,
+        source,
       })
     ) {
       const hold = await findActiveProviderQuotaHold(db, {
@@ -2519,6 +2528,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         agentId,
         now: new Date(),
       });
+      if (!hold) {
+        await releaseProviderQuotaParkedRuns(db, {
+          companyId: agent.companyId,
+          agentId,
+        });
+      }
       if (hold) {
         const parked = await deferWakeForProviderQuotaHold({
           agent,

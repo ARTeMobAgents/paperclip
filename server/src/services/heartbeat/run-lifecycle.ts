@@ -18,6 +18,7 @@ import {
 import { CONFIGURATION_INCOMPLETE_FAILURE_CODE } from "./run-preparation.js";
 import { WORKSPACE_VALIDATION_FAILURE_CODE } from "./workspaces.js";
 import { boundHeartbeatRunEventPayloadForStorage } from "./run-log.js";
+import { releaseProviderQuotaParkedRuns } from "./provider-quota-hold.js";
 import { preserveWorkspaceRestoreRecoveryMetadata } from "../workspace-restore-recovery-state.js";
 import { pendingNativeWorkspaceFinalizationCondition } from "../native-runtime/native-workspace-finalization-state.js";
 import { activeIssueInteractionCondition } from "../issue-question-context.js";
@@ -1091,6 +1092,17 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
         payload: buildHeartbeatRunStatusLiveEventPayload(updated),
       });
       publishRunLifecyclePluginEvent(updated);
+      if (updated.status === "succeeded") {
+        await releaseProviderQuotaParkedRuns(db, {
+          companyId: updated.companyId,
+          agentId: updated.agentId,
+        }).catch((error: unknown) => {
+          logger.warn(
+            { err: error, runId: updated.id },
+            "failed to release provider quota parked runs after success",
+          );
+        });
+      }
       emitTerminalAgentTaskRun(updated, previousStatus?.status ?? null);
     }
 
@@ -1215,6 +1227,17 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
         payload: buildHeartbeatRunStatusLiveEventPayload(updated),
       });
       publishRunLifecyclePluginEvent(updated);
+      if (updated.status === "succeeded") {
+        await releaseProviderQuotaParkedRuns(db, {
+          companyId: updated.companyId,
+          agentId: updated.agentId,
+        }).catch((error: unknown) => {
+          logger.warn(
+            { err: error, runId: updated.id },
+            "failed to release provider quota parked runs after success",
+          );
+        });
+      }
       emitTerminalAgentTaskRun(updated, previousStatus?.status ?? null, failureReport);
       return { run: updated, updated: true as const };
     }

@@ -7,6 +7,7 @@ import {
   PROVIDER_QUOTA_HOLD_FALLBACK_MS,
   PROVIDER_QUOTA_HOLD_LOOKBACK_MS,
   findActiveProviderQuotaHold,
+  releaseProviderQuotaParkedRuns,
   readProviderQuotaHoldRetryAt,
   resolveProviderQuotaCapacityKey,
   shouldParkAutomaticWakeForProviderQuota,
@@ -32,6 +33,15 @@ describe("provider quota capacity key", () => {
     expect(
       resolveProviderQuotaCapacityKey({ adapterType: "codex_local" }),
     ).toBe("codex_local:adapter:codex_local");
+  });
+
+  it("keeps confirmed model-specific quota separate on one local account", () => {
+    expect(resolveProviderQuotaCapacityKey({
+      adapterType: "codex_local", adapterConfig: { model: "gpt-6-astra" },
+    })).toBe("codex_local:adapter:codex_local:model:gpt-6-astra");
+    expect(resolveProviderQuotaCapacityKey({
+      adapterType: "codex_local", adapterConfig: { model: "gpt-6-sol" },
+    })).not.toBe("codex_local:adapter:codex_local:model:gpt-6-astra");
   });
 });
 
@@ -221,6 +231,50 @@ describe.skipIf(!support.supported)("provider quota hold", () => {
     await expect(
       findActiveProviderQuotaHold(db, { companyId: company.id, agentId: codex.id, now }),
     ).resolves.toBeNull();
+  });
+
+  it("finds a quota failure behind more than one page of unrelated terminal runs", async () => {
+    const { company, codex, claude } = await fixture();
+    const now = new Date("2026-10-25T12:00:00.000Z");
+    await terminalRun({
+      companyId: company.id,
+      agentId: codex.id,
+      status: "failed",
+      errorCode: "provider_quota",
+      finishedAt: new Date(now.getTime() - 10 * 60 * 1000),
+      resultJson: { providerQuotaRetryNotBefore: new Date(now.getTime() + 60 * 60 * 1000).toISOString() },
+    });
+    await db.insert(heartbeatRuns).values(Array.from({ length: 201 }, (_, index) => ({
+      companyId: company.id,
+      agentId: claude.id,
+      status: "succeeded",
+      invocationSource: "automation",
+      finishedAt: new Date(now.getTime() - index * 1000),
+      contextSnapshot: {},
+    })));
+
+    await expect(findActiveProviderQuotaHold(db, { companyId: company.id, agentId: codex.id, now }))
+      .resolves.toMatchObject({ capacityKey: "codex_local:adapter:codex_local" });
+  });
+
+  it("releases parked wakes on the same capacity after a success", async () => {
+    const { company, codex, claude } = await fixture();
+    const now = new Date("2026-10-25T12:00:00.000Z");
+    const parkedAt = new Date(now.getTime() + 60 * 60 * 1000);
+    const [sameCapacity] = await db.insert(agents).values({
+      companyId: company.id, name: "Other Codex agent", role: "engineer",
+      status: "idle", adapterType: "codex_local", adapterConfig: {},
+    }).returning();
+    const parked = await db.insert(heartbeatRuns).values([
+      { companyId: company.id, agentId: sameCapacity.id, status: "scheduled_retry", scheduledRetryReason: "provider_quota_recovery", scheduledRetryAt: parkedAt, contextSnapshot: { providerQuotaCapacityKey: "codex_local:adapter:codex_local" } },
+      { companyId: company.id, agentId: claude.id, status: "scheduled_retry", scheduledRetryReason: "provider_quota_recovery", scheduledRetryAt: parkedAt, contextSnapshot: { providerQuotaCapacityKey: "claude_local:adapter:claude_local" } },
+    ]).returning();
+    await terminalRun({ companyId: company.id, agentId: codex.id, status: "succeeded", finishedAt: now });
+
+    await releaseProviderQuotaParkedRuns(db, { companyId: company.id, agentId: codex.id, now });
+    const rows = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.status, "scheduled_retry"));
+    expect(rows.find((row) => row.id === parked[0].id)?.scheduledRetryAt).toEqual(now);
+    expect(rows.find((row) => row.id === parked[1].id)?.scheduledRetryAt).toEqual(parkedAt);
   });
 
   it("ignores terminal quota evidence outside the lookback window", async () => {
