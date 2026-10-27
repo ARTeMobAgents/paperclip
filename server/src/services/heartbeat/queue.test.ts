@@ -1,6 +1,6 @@
 import { claimNativeSessionResumptions } from "../native-runtime/native-finalization-reconciler.js";
 import type { Db } from "@paperclipai/db";
-import { agents, agentWakeupRequests, caseHandoffs, cases, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, issueComments, issues, nativeRunFinalizations } from "@paperclipai/db";
+import { agents, agentWakeupRequests, caseHandoffs, cases, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRunEvents, heartbeatRuns, issueComments, issues, nativeRunFinalizations } from "@paperclipai/db";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
@@ -87,6 +87,36 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
   });
   beforeEach(async () => {
     await db.execute(sql`truncate table companies restart identity cascade`);
+  });
+
+  it("parks and coalesces automatic wakes with a committed run event", async () => {
+    const [company] = await db.insert(companies).values({ name: "Quota queue", issuePrefix: "QQ" }).returning();
+    const [agent] = await db.insert(agents).values({
+      companyId: company.id, name: "Quota agent", role: "engineer",
+      status: "idle", adapterType: "codex_local", adapterConfig: { model: "gpt-6-astra" },
+    }).returning();
+    const reset = new Date(Date.now() + 60 * 60 * 1000);
+    await db.insert(heartbeatRuns).values({
+      companyId: company.id, agentId: agent.id, status: "failed",
+      invocationSource: "automation", errorCode: "provider_quota",
+      finishedAt: new Date(), resultJson: { providerQuotaRetryNotBefore: reset.toISOString() },
+      contextSnapshot: {},
+    });
+    const deps = callbacks(db);
+    deps.getAgent.mockResolvedValue(agent);
+    const queue = createHeartbeatQueue(db, deps);
+    const first = await queue.enqueueWakeup(agent.id, { source: "automation", reason: "first" });
+    const second = await queue.enqueueWakeup(agent.id, { source: "automation", reason: "second" });
+
+    expect(first).toMatchObject({ status: "scheduled_retry", scheduledRetryAt: reset });
+    expect(second?.id).toBe(first?.id);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.status, "scheduled_retry")))
+      .toHaveLength(1);
+    const events = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, first!.id));
+    expect(events.map((event) => event.eventType)).toEqual([
+      "provider.quota_gate.deferred", "provider.quota_gate.deferred",
+    ]);
+    expect(deps.executeRun).not.toHaveBeenCalled();
   });
 
   async function fixture(status = "running") {
