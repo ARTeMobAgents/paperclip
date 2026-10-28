@@ -942,8 +942,9 @@ separate restore test.
 The backup writer uses a temporary `.part.gz` file and publishes the final
 `.sql.gz` name only after compression and optional verification complete.
 Health and retention ignore files that are still being written.
-An empty `pg_dump` stream triggers the JavaScript backup fallback instead of
-publishing a 20 byte gzip file.
+An empty `pg_dump` stream triggers the JavaScript backup fallback in the default
+`auto` mode instead of publishing a 20 byte gzip file. In forced `pg_dump`
+mode, the backup fails without publishing an archive.
 
 ## Secret storage
 
