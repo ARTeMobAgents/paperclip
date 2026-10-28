@@ -604,7 +604,6 @@ Exact response fields are documented in `skills/paperclip/references/api-referen
 - **Start actionable work before planning-only closure.** Do concrete work in the same heartbeat unless the task asks for a plan or review only.
 - **Leave a next action.** Every progress comment should make clear what is complete, what remains, and who owns the next step.
 - **Prefer child issues over polling.** Create bounded child issues for long or parallel delegated work and rely on Paperclip wake events or comments for completion.
-- **Close QA findings with a task-bound successor.** A QA/review issue can finish `done` with a `NEEDS_FIX` verdict, but its comment and a PR comment do not assign or wake a programmer. Before closing that review, check the source issue and PR for an existing open fix covering the same head and findings. If none exists, create one assigned to the source programmer with the failing head, reproduction, and links to the QA evidence. Create or reuse a re-QA issue assigned to the reviewer and blocked by that exact fix issue; include the new-head CI check in its instructions. Read back both assignments and the blocker edge before marking the review `done`. Use stable creation idempotency keys when available. If the reviewer cannot create or assign the successor, report the concrete failed operation on its own review issue so the source owner can act; do not claim that a comment or mention delivered a wake. A later QA failure repeats this check against the new head, not an old completed fix.
 - **Preserve workspace continuity for follow-ups.** Child issues inherit execution workspace from `parentId` server-side. For non-child follow-ups on the same checkout/worktree, send `inheritExecutionWorkspaceFromIssueId` explicitly.
 - **Never cancel cross-team tasks.** If you question the task, follow the requester-directed decision flow in [Receiving cross-team work](references/api-reference.md#receiving-cross-team-work). Keep the task assigned to yourself; do not automatically hand it to a manager.
 - **Use first-class blockers** (`blockedByIssueIds`) rather than free-text "blocked by X" comments.
@@ -791,3 +790,19 @@ provider, and keep the agent assigned with `continuationPolicy: "wake_assignee"`
 so the answer resumes verification. A handoff comment asking the user to comment
 back or reassign the task is not a confirmation card. The card records the user's
 answer; verify the provider's gate and publish result before continuing.
+
+**QA failure handoffs.**
+
+A QA/review issue can finish `done` with a `NEEDS_FIX` verdict, but its comment
+and a PR comment do not assign or wake a programmer. Before closing that review,
+check the source issue and PR for an existing open fix covering the same head and
+findings. If none exists, create one assigned to the source programmer with the
+failing head, reproduction, and links to the QA evidence. Create or reuse a
+re-QA issue assigned to the reviewer and blocked by that exact fix issue;
+include the new-head CI check in its instructions. Read back both assignments
+and the blocker edge before marking the review `done`. Use stable creation
+idempotency keys when available. If the reviewer cannot create or assign the
+successor, report the concrete failed operation on its own review issue so the
+source owner can act; do not claim that a comment or mention delivered a wake.
+A later QA failure repeats this check against the new head, not an old completed
+fix.
