@@ -933,6 +933,12 @@ Database backups do not include non-database instance files such as local-disk
 uploads, workspace files, or the local encrypted secrets master key. Back those paths
 up separately when you need full instance disaster recovery.
 
+Backup health warns when the newest `.sql.gz` file has a gzip trailer that
+reports zero uncompressed bytes, even if the archive is recent. The health
+check reads gzip framing only. It does not
+prove that a backup can be restored; verify important recovery points with a
+separate restore test.
+
 ## Secret storage
 
 Paperclip stores secret metadata and versions in:
