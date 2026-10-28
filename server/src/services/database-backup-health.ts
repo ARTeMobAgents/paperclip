@@ -103,10 +103,6 @@ function findLatestBackup(backupDir: string, nowMs: number) {
   };
 }
 
-// A gzip stream can be valid while containing zero SQL bytes (20 bytes for the
-// usual empty stream). Read only its framing; decompressing a large dump on
-// every health request would block the server. The trailer's ISIZE is the
-// uncompressed byte count modulo 2^32, so a zero is conservatively unhealthy.
 function hasNonemptyGzipPayload(filePath: string, size: number): boolean {
   if (size < 20) return false;
   const fd = openSync(filePath, "r");

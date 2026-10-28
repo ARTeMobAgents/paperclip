@@ -939,6 +939,10 @@ check reads gzip framing only. It does not
 prove that a backup can be restored; verify important recovery points with a
 separate restore test.
 
+The backup writer uses a temporary `.part.gz` file and publishes the final
+`.sql.gz` name only after compression and optional verification complete.
+Health and retention ignore files that are still being written.
+
 ## Secret storage
 
 Paperclip stores secret metadata and versions in:

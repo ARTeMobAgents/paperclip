@@ -95,6 +95,8 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
         retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
         verifyBeforePrune: async archive => {
           verified++;
+          expect(archive).toMatch(/\.part\.gz$/);
+          expect(fs.existsSync(archive.replace(/\.[0-9a-f-]+\.part\.gz$/, ""))).toBe(false);
           expect(gunzipSync(fs.readFileSync(archive)).toString()).toBe("SELECT 1;\n");
           throw failure;
         },
@@ -102,10 +104,32 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
       expect(verified).toBe(1);
       expect(fs.readFileSync(history)).toEqual(historyBytes);
       expect(fs.readdirSync(backupDir).filter(name => name.endsWith(".sql.gz"))).toEqual(["paperclip-history.sql.gz"]);
+      expect(fs.readdirSync(backupDir).filter(name => name.endsWith(".part.gz"))).toEqual([]);
     } finally {
       if (previous === undefined) delete process.env.PAPERCLIP_PG_DUMP_PATH;
       else process.env.PAPERCLIP_PG_DUMP_PATH = previous;
     }
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
+  it("publishes JavaScript backups only after verification", async () => {
+    const connectionString = await createTempDatabase();
+    const backupDir = createTempDir("paperclip-pending-backup-");
+    let verified = false;
+    const result = await runDatabaseBackup({
+      connectionString,
+      backupDir,
+      backupEngine: "javascript",
+      retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
+      verifyBeforePrune: async archive => {
+        verified = true;
+        expect(archive).toMatch(/\.part\.gz$/);
+        expect(fs.readdirSync(backupDir).filter(name => name.endsWith(".sql.gz"))).toEqual([]);
+        expect(gunzipSync(fs.readFileSync(archive)).length).toBeGreaterThan(0);
+      },
+    });
+    expect(verified).toBe(true);
+    expect(fs.existsSync(result.backupFile)).toBe(true);
+    expect(fs.readdirSync(backupDir).filter(name => name.endsWith(".part.gz"))).toEqual([]);
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   it("preserves identity generation, sequence options and progress in JavaScript backups", async () => {
