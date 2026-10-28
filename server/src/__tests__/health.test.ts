@@ -292,6 +292,54 @@ describe("GET /health", () => {
     });
   });
 
+  it("ignores an open incomplete archive until its final name is published", async () => {
+    const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-health-inflight-backup-"));
+    const previousFile = path.join(backupDir, "paperclip-20261028-124604.sql.gz");
+    const finalFile = path.join(backupDir, "paperclip-20261028-140958.sql.gz");
+    const pendingFile = `${finalFile}.fixture.part.gz`;
+    fs.writeFileSync(previousFile, gzipSync("SELECT 1;\n"));
+    const pendingBytes = gzipSync("SELECT 2;\n");
+    const fd = fs.openSync(pendingFile, "w");
+    try {
+      fs.writeSync(fd, pendingBytes.subarray(0, 20));
+      const app = createApp(createHealthyDb(), testServerInfo, {
+        enabled: true,
+        backupDir,
+        maxAgeHours: 26,
+        now: new Date(),
+      });
+
+      const inProgress = await request(app).get("/health");
+      expect(inProgress.status).toBe(200);
+      expect(inProgress.body.databaseBackup).toMatchObject({
+        status: "ok",
+        latestBackup: { name: path.basename(previousFile) },
+        warnings: [],
+      });
+
+      fs.writeSync(fd, pendingBytes.subarray(20));
+    } finally {
+      fs.closeSync(fd);
+    }
+    try {
+      fs.linkSync(pendingFile, finalFile);
+      const app = createApp(createHealthyDb(), testServerInfo, {
+        enabled: true,
+        backupDir,
+        maxAgeHours: 26,
+        now: new Date(),
+      });
+      const published = await request(app).get("/health");
+      expect(published.body.databaseBackup).toMatchObject({
+        status: "ok",
+        latestBackup: { name: path.basename(finalFile) },
+        warnings: [],
+      });
+    } finally {
+      fs.rmSync(backupDir, { recursive: true, force: true });
+    }
+  });
+
   it("surfaces database backup failure markers in full health details", async () => {
     const backupDir = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-health-backups-"));
     const backupFile = path.join(backupDir, "paperclip-20260706-031702.sql.gz");
