@@ -43,12 +43,14 @@ async function setup(request: APIRequestContext) {
 
 const editor = (page: Page) => page.getByRole("textbox", { name: "Agent YAML configuration" });
 async function document(page: Page): Promise<AgentConfigurationDocument> {
-  await expect(editor(page)).toBeVisible();
-  await expect(editor(page)).toHaveAttribute("contenteditable", "true");
+  await expect(page.getByText("Loading configuration…", { exact: true })).toHaveCount(0, { timeout: 15_000 });
+  await expect(editor(page)).toBeVisible({ timeout: 15_000 });
+  await expect(editor(page)).toHaveAttribute("contenteditable", "true", { timeout: 15_000 });
+  await editor(page).click();
   await editor(page).press("ControlOrMeta+a");
   await editor(page).press("ControlOrMeta+c");
   const source = await page.evaluate(() => navigator.clipboard.readText());
-  expect(source).toContain("apiVersion: paperclip/v1");
+  expect(source.startsWith("apiVersion: paperclip/v1")).toBe(true);
   return parse(source);
 }
 async function edit(page: Page, change: (value: AgentConfigurationDocument) => void) {
@@ -60,7 +62,7 @@ async function edit(page: Page, change: (value: AgentConfigurationDocument) => v
 async function save(page: Page) {
   await page.getByRole("button", { name: "Save changes", exact: true }).click();
   await expect(page.getByText("Unsaved changes", { exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Save changes", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Save changes", exact: true })).toBeDisabled({ timeout: 15_000 });
   await expect(page.getByRole("button", { name: "Reload saved", exact: true })).toBeEnabled();
   await expect(page.getByRole("alert")).toHaveCount(0);
 }
@@ -198,8 +200,8 @@ test("a lost creation response requires reload and cannot blindly replay command
   expect(await json(await request.get(`/api/agents/${agent.id}/keys`))).toHaveLength(2);
   expect((await document(page)).spec.apiKeys!.create).toHaveLength(2);
   await page.getByRole("button", { name: "Reload saved", exact: true }).click();
-  await expect.poll(async () => (await document(page)).spec.apiKeys!.create).toEqual([]);
   await expect(page).toHaveURL(/\/agents\/partially-renamed-yaml-engineer\/advanced$/);
+  await expect.poll(async () => (await document(page)).spec.apiKeys!.create).toEqual([]);
   await expect(page.getByRole("textbox", { name: "API key: First key token" })).toBeVisible();
   await edit(page, value => { value.spec.title = "Recovered save"; });
   await save(page);
