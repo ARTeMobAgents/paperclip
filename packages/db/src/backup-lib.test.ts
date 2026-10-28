@@ -111,6 +111,28 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
     }
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
+  it("falls back from an empty pg_dump stream without publishing it", async () => {
+    const connectionString = await createTempDatabase();
+    const backupDir = createTempDir("paperclip-empty-pg-dump-");
+    const executable = path.join(backupDir, "pg-dump-empty-fixture");
+    fs.writeFileSync(executable, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+    const previous = process.env.PAPERCLIP_PG_DUMP_PATH;
+    process.env.PAPERCLIP_PG_DUMP_PATH = executable;
+    try {
+      const result = await runDatabaseBackup({
+        connectionString,
+        backupDir,
+        retention: { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 },
+      });
+      expect(fs.existsSync(result.backupFile)).toBe(true);
+      expect(gunzipSync(fs.readFileSync(result.backupFile)).length).toBeGreaterThan(0);
+      expect(fs.readdirSync(backupDir).filter(name => name.endsWith(".part.gz"))).toEqual([]);
+    } finally {
+      if (previous === undefined) delete process.env.PAPERCLIP_PG_DUMP_PATH;
+      else process.env.PAPERCLIP_PG_DUMP_PATH = previous;
+    }
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
   it("publishes JavaScript backups only after verification", async () => {
     const connectionString = await createTempDatabase();
     const backupDir = createTempDir("paperclip-pending-backup-");

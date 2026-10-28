@@ -354,6 +354,7 @@ async function runPgDumpBackup(opts: {
     pipeline(child.stdout, createGzip(), createWriteStream(opts.backupFile)),
     waitForChildExit(child, pgDumpBin),
   ]);
+  if (statSync(opts.backupFile).size <= 20) throw new Error("pg_dump produced an empty archive");
 }
 
 async function restoreWithPsql(opts: RunDatabaseRestoreOptions, connectTimeout: number): Promise<void> {
@@ -552,9 +553,11 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
   const backupFile = `${sqlFile}.gz`;
   const pendingBackupFile = `${backupFile}.${randomUUID()}.part.gz`;
   const writer = createBufferedTextFileWriter(sqlFile);
-  const publishBackup = () => {
+  const publishBackup = async () => {
     linkSync(pendingBackupFile, backupFile);
     unlinkSync(pendingBackupFile);
+    const directory = await openFile(opts.backupDir, "r");
+    try { await directory.sync(); } finally { await directory.close(); }
   };
 
   try {
@@ -587,7 +590,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
         await writer.abort();
         const sizeBytes = statSync(pendingBackupFile).size;
         await opts.verifyBeforePrune?.(pendingBackupFile);
-        publishBackup();
+        await publishBackup();
         const prunedCount = pruneOldBackups(opts.backupDir, retention, filenamePrefix);
         return { backupFile, sizeBytes, prunedCount };
       }
@@ -1071,8 +1074,9 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
     await pipeline(sqlReadStream, createGzip(), gzWriteStream);
 
     const sizeBytes = statSync(pendingBackupFile).size;
+    if (sizeBytes <= 20) throw new Error("Database backup archive has no SQL payload");
     await opts.verifyBeforePrune?.(pendingBackupFile);
-    publishBackup();
+    await publishBackup();
     unlinkSync(sqlFile);
     const prunedCount = pruneOldBackups(opts.backupDir, retention, filenamePrefix);
 
