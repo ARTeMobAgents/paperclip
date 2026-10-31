@@ -34,6 +34,13 @@ describe("legacy continuation authority", () => {
     expect(second).not.toEqual(first);
     expect(decideLegacyContinuation({ ...input, episode: { ...input.episode, attempt: 2 } }).kind).toBe("exhausted");
   });
+  it("hands a successful repair with unfinished todo source work to one ordinary continuation", () => {
+    const repair = { ...input, issue: { ...input.issue!, status: "todo" }, episode: { ...input.episode, attempt: 2 } };
+    expect(decideLegacyContinuation(repair)).toMatchObject({ kind: "continue_source_work" });
+    expect(decideLegacyContinuation({ ...repair, gates: { ...repair.gates, paused: true } }).kind).toBe("skip");
+    expect(decideLegacyContinuation({ ...repair, gates: { ...repair.gates, activeExecution: true } }).kind).toBe("skip");
+    expect(decideLegacyContinuation({ ...repair, run: { ...repair.run, contextSnapshot: { legacyDispositionSourceContinuation: true } } }).kind).toBe("exhausted");
+  });
   it("does not resurrect an exhausted pre-upgrade liveness or handoff budget", () => {
     for (const run of [
       { id: "old", continuationAttempt: 2 },
