@@ -3,7 +3,9 @@ import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import { createHeartbeatQueueTestDependencies } from "../../__tests__/helpers/heartbeat-queue.js";
-import { createHeartbeatQueue } from "../heartbeat/queue.js";
+import { createHeartbeatQueue, shouldDeferFollowupWakeForSameIssue, shouldQueueFollowupForRunningIssueWake } from "../heartbeat/queue.js";
+import { mergeCoalescedContextSnapshot } from "../heartbeat/run-preparation.js";
+import { filterZombieCoalesceTarget } from "../heartbeat.js";
 import { createWakeQueue } from "../../modules/wake-queue/index.js";
 import { recoveryService } from "./service.js";
 
@@ -83,10 +85,10 @@ describe.skipIf(!support.supported)("legacy disposition repair source hand-back"
       getRoutineEnv: async () => ({ routineId: null, env: null, responsibleUserId: null }),
       resolveSessionBeforeForWakeup: async () => null,
       wakeAdmissionHelpers: {
-        filterZombieCoalesceTarget: target => target,
-        mergeCoalescedContextSnapshot: (existing, incoming) => ({ ...(existing && typeof existing === "object" ? existing : {}), ...incoming }),
-        shouldDeferFollowupWakeForSameIssue: () => false,
-        shouldQueueFollowupForRunningIssueWake: () => false,
+        filterZombieCoalesceTarget,
+        mergeCoalescedContextSnapshot,
+        shouldDeferFollowupWakeForSameIssue,
+        shouldQueueFollowupForRunningIssueWake,
       },
       recovery: {
         escalateStrandedAssignedIssue: async () => undefined,
