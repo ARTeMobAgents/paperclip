@@ -78,7 +78,7 @@ describe.skipIf(!support.supported)("legacy disposition repair source hand-back"
         legacyDispositionEpisode: { id: "queue-episode", attempt: 2, maxAttempts: 2 } },
     }).returning();
     const deps = createHeartbeatQueueTestDependencies(db);
-    deps.getAgent.mockImplementation(async id => id === agent.id ? agent : id === other.id ? other : null);
+    deps.getAgent.mockImplementation(async id => id === other.id ? other : agent);
     deps.instanceSettings.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false } as Awaited<ReturnType<typeof deps.instanceSettings.getExperimental>>);
     const wakeQueue = createWakeQueue(db, {
       resolveResponsibleUserId: async () => "queue-test-user",
