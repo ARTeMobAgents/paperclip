@@ -77,8 +77,12 @@ export function decideLegacyContinuation(input: LegacyContinuationInput):
     [gates.conversation, "conversation"],
     [!gates.agentInvokable || ["paused", "terminated", "pending_approval"].includes(agent.status), "agent_not_invokable"],
   ] as const) if (blocked) return { kind: "skip", reason };
-  if (episode.attempt > 0 && issue.status === "todo" &&
-      record(run.contextSnapshot).legacyDispositionSourceContinuation !== true) {
+  // This is an ordinary source-work turn, not another attempt in the legacy
+  // repair episode. Leaving the issue open must not exhaust the repair quota.
+  if (record(run.contextSnapshot).legacyDispositionSourceContinuation === true) {
+    return { kind: "skip", reason: "ordinary_source_continuation" };
+  }
+  if (episode.attempt > 0 && issue.status === "todo") {
     return {
       kind: "continue_source_work",
       idempotencyKey: `issue_disposition_repair:${issue.id}:${legacyDispositionFingerprint(run.companyId, issue.id, run.agentId, episode.id)}:source_continuation`,

@@ -39,7 +39,9 @@ describe("legacy continuation authority", () => {
     expect(decideLegacyContinuation(repair)).toMatchObject({ kind: "continue_source_work" });
     expect(decideLegacyContinuation({ ...repair, gates: { ...repair.gates, paused: true } }).kind).toBe("skip");
     expect(decideLegacyContinuation({ ...repair, gates: { ...repair.gates, activeExecution: true } }).kind).toBe("skip");
-    expect(decideLegacyContinuation({ ...repair, run: { ...repair.run, contextSnapshot: { legacyDispositionSourceContinuation: true } } }).kind).toBe("exhausted");
+    expect(decideLegacyContinuation({ ...repair, run: { ...repair.run, contextSnapshot: { legacyDispositionSourceContinuation: true } } })).toMatchObject({
+      kind: "skip", reason: "ordinary_source_continuation",
+    });
   });
   it("does not resurrect an exhausted pre-upgrade liveness or handoff budget", () => {
     for (const run of [

@@ -2,6 +2,9 @@ import { agents, agentWakeupRequests, companies, createDb, heartbeatRuns, issues
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
+import { createHeartbeatQueueTestDependencies } from "../../__tests__/helpers/heartbeat-queue.js";
+import { createHeartbeatQueue } from "../heartbeat/queue.js";
+import { createWakeQueue } from "../../modules/wake-queue/index.js";
 import { recoveryService } from "./service.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -60,5 +63,56 @@ describe.skipIf(!support.supported)("legacy disposition repair source hand-back"
     expect(options?.contextSnapshot?.legacyDispositionEpisode).toBeUndefined();
     expect(await service.reconcileLegacyContinuation(repair.id)).toBe("skipped");
     expect(enqueueWakeup).toHaveBeenCalledOnce();
+  });
+
+  it("admits one real queued turn and rejects a stale owner after concurrent reconciliation", async () => {
+    const [company] = await db.insert(companies).values({ name: "Queue admission fixture", issuePrefix: "QAF" }).returning();
+    const [agent] = await db.insert(agents).values({ companyId: company.id, name: "Source owner", status: "idle", adapterType: "process" }).returning();
+    const [other] = await db.insert(agents).values({ companyId: company.id, name: "Other owner", status: "idle", adapterType: "process" }).returning();
+    const [issue] = await db.insert(issues).values({ companyId: company.id, title: "Implement source fix", status: "todo", assigneeAgentId: agent.id, responsibleUserId: "queue-test-user" }).returning();
+    const [repair] = await db.insert(heartbeatRuns).values({
+      companyId: company.id, agentId: agent.id, status: "succeeded", runtimeMode: "legacy",
+      contextSnapshot: { issueId: issue.id, source: "issue.deliberate_wait_disposition_repair",
+        legacyDispositionEpisode: { id: "queue-episode", attempt: 2, maxAttempts: 2 } },
+    }).returning();
+    const deps = createHeartbeatQueueTestDependencies(db);
+    deps.getAgent.mockImplementation(async id => id === agent.id ? agent : id === other.id ? other : null);
+    deps.instanceSettings.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false } as Awaited<ReturnType<typeof deps.instanceSettings.getExperimental>>);
+    const wakeQueue = createWakeQueue(db, {
+      resolveResponsibleUserId: async () => "queue-test-user",
+      getRoutineEnv: async () => ({ routineId: null, env: null, responsibleUserId: null }),
+      resolveSessionBeforeForWakeup: async () => null,
+      wakeAdmissionHelpers: {
+        filterZombieCoalesceTarget: target => target,
+        mergeCoalescedContextSnapshot: (existing, incoming) => ({ ...(existing && typeof existing === "object" ? existing : {}), ...incoming }),
+        shouldDeferFollowupWakeForSameIssue: () => false,
+        shouldQueueFollowupForRunningIssueWake: () => false,
+      },
+      recovery: {
+        escalateStrandedAssignedIssue: async () => undefined,
+        escalateStrandedRecoveryIssueInPlace: async () => undefined,
+      },
+    });
+    const queue = createHeartbeatQueue(db, { ...deps, wakeQueue });
+    const service = recoveryService(db, { enqueueWakeup: queue.enqueueWakeup });
+
+    const results = await Promise.all([service.reconcileLegacyContinuation(repair.id), service.reconcileLegacyContinuation(repair.id)]);
+    expect(results.filter(result => result === "queued")).toHaveLength(1);
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agent.id));
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]).toMatchObject({ status: "queued", runId: expect.any(String) });
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.wakeupRequestId, wakes[0]!.id));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.contextSnapshot).toMatchObject({ issueId: issue.id, source: "issue.disposition_repair_source_continuation" });
+
+    // An ordinary successor can finish a useful source turn while its issue
+    // remains open. It must not consume another repair attempt or block it.
+    await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, runs[0]!.id));
+    expect(await service.reconcileLegacyContinuation(runs[0]!.id)).toBe("skipped");
+    expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0]).toMatchObject({ status: "todo", assigneeAgentId: agent.id });
+
+    await db.update(issues).set({ assigneeAgentId: other.id }).where(eq(issues.id, issue.id));
+    expect(await service.reconcileLegacyContinuation(repair.id)).toBe("skipped");
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agent.id))).toHaveLength(1);
   });
 });

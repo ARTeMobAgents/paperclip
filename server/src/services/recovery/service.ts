@@ -4010,17 +4010,29 @@ export function recoveryService(
         dispositionRepairFingerprint: episode.id,
         dispositionRepairAttempt: episode.maxAttempts,
       }, "normal_model");
-      const queued = await deps.enqueueWakeup(ownerAgentId, {
-        source: "automation",
-        triggerDetail: "system",
-        reason: "issue_continuation_needed",
-        idempotencyKey: sourceContinuationKey,
-        payload: sourceContinuationContext,
-        requestedByActorType: "system",
-        requestedByActorId: null,
-        contextSnapshot: sourceContinuationContext,
-        issueStateGuard: { statuses: ["todo"], assigneeAgentId: ownerAgentId },
-      });
+      let queued: Awaited<ReturnType<typeof deps.enqueueWakeup>>;
+      try {
+        queued = await deps.enqueueWakeup(ownerAgentId, {
+          source: "automation",
+          triggerDetail: "system",
+          reason: "issue_continuation_needed",
+          idempotencyKey: sourceContinuationKey,
+          payload: sourceContinuationContext,
+          requestedByActorType: "system",
+          requestedByActorId: null,
+          contextSnapshot: sourceContinuationContext,
+          issueStateGuard: { statuses: ["todo"], assigneeAgentId: ownerAgentId },
+        });
+      } catch (error) {
+        if (!isUniqueViolation(error, "agent_wakeup_requests_disposition_repair_idempotency_uq")) throw error;
+        const [existing] = await db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+          eq(agentWakeupRequests.companyId, current.companyId),
+          eq(agentWakeupRequests.agentId, ownerAgentId),
+          eq(agentWakeupRequests.idempotencyKey, sourceContinuationKey),
+        )).limit(1);
+        if (!existing) throw error;
+        return "skipped";
+      }
       if (queued) {
         await resolveDispositionRepairActionAsCovered(current, "source_work_continuation_queued");
       }
