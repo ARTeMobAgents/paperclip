@@ -107,6 +107,10 @@ describe.skipIf(!support.supported)("legacy disposition repair source hand-back"
     expect(runs).toHaveLength(1);
     expect(runs[0]!.contextSnapshot).toMatchObject({ issueId: issue.id, source: "issue.disposition_repair_source_continuation" });
 
+    expect(runs[0]!.status).toBe("running");
+    expect(deps.executeRun).toHaveBeenCalledExactlyOnceWith(runs[0]!.id);
+    expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0]!.executionRunId).toBe(runs[0]!.id);
+
     // An ordinary successor can finish a useful source turn while its issue
     // remains open. It must not consume another repair attempt or block it.
     await db.update(heartbeatRuns).set({ status: "succeeded" }).where(eq(heartbeatRuns.id, runs[0]!.id));
